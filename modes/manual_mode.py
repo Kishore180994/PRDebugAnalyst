@@ -178,9 +178,9 @@ declare BUILD_UNFIXABLE_PROJECT_CHANGES_REQUIRED."""
         commands = [a.content for a in actions if a.action_type == ActionType.COMMAND]
 
         if len(commands) == 1:
-            command_display(commands[0], self.bridge.log_file, auto_copy=True)
+            command_display(commands[0], auto_copy=True)
         elif len(commands) > 1:
-            commands_display(commands, self.bridge.log_file)
+            commands_display(commands)
 
         for action in actions:
             if action.action_type == ActionType.VERDICT:
@@ -220,9 +220,10 @@ declare BUILD_UNFIXABLE_PROJECT_CHANGES_REQUIRED."""
 
         if not new_logs.strip():
             progress_done("no new content")
-            warning("No new logs found. Make sure Terminal A output is being logged.")
-            diminfo(f"Expected: {self.bridge.log_file}")
-            diminfo("You can also paste log content directly as a message.")
+            warning("No new logs found in Terminal A.")
+            diminfo(f"Log file: {self.bridge.log_file}")
+            diminfo("Make sure you started `script` in Terminal A first.")
+            diminfo("Run the command in Terminal A, then press Enter here again.")
             return
 
         progress_done(f"{len(new_logs.splitlines())} lines")
@@ -447,9 +448,9 @@ If you've reached a conclusion that this is unfixable, provide the SUMMARY block
         self._commands_suggested.extend(commands)
 
         if len(commands) == 1:
-            command_display(commands[0], self.bridge.log_file, auto_copy=True)
+            command_display(commands[0], auto_copy=True)
         else:
-            commands_display(commands, self.bridge.log_file)
+            commands_display(commands)
 
     def _batch_read_files(self, filepaths: list[str]) -> list[str]:
         """Read multiple files and return formatted content strings."""

@@ -276,7 +276,7 @@ def user_prompt(prompt_text: str = "") -> str:
 #  Command Display — copyable, with auto-clipboard
 # ═══════════════════════════════════════════════════════════════════════════
 
-def command_display(command: str, log_file: str = "", auto_copy: bool = True):
+def command_display(command: str, auto_copy: bool = True):
     """
     Display a command for the user to run in Terminal A.
 
@@ -292,13 +292,7 @@ def command_display(command: str, log_file: str = "", auto_copy: bool = True):
 
     # Print the raw command as plain text — easy to triple-click & copy
     console.print(f"  {command}")
-
     console.print()
-    if log_file:
-        logged = f'({command}) 2>&1 | tee -a "{log_file}"'
-        console.print(f"  [dim]with logging:[/dim]")
-        console.print(f"  [dim]{logged}[/dim]")
-        console.print()
 
     # Auto-copy to clipboard
     if auto_copy:
@@ -307,10 +301,11 @@ def command_display(command: str, log_file: str = "", auto_copy: bool = True):
         else:
             console.print(f"  [dim]ℹ Tip: triple-click the command line to select & copy[/dim]")
 
+    console.print(f"  [dim]Then press Enter here to scan the output[/dim]")
     console.print()
 
 
-def commands_display(commands: list[str], log_file: str = ""):
+def commands_display(commands: list[str]):
     """
     Display multiple commands. Does NOT auto-copy (user picks which to copy).
     Each command is on its own line for easy individual selection.
@@ -323,9 +318,8 @@ def commands_display(commands: list[str], log_file: str = ""):
         console.print(f"  [dim]{i}.[/dim] {cmd}")
 
     console.print()
-    if log_file:
-        console.print(f"  [dim]Tip: append[/dim] 2>&1 | tee -a \"{log_file}\" [dim]to capture logs[/dim]")
     console.print(f"  [dim]ℹ Select a command line to copy it[/dim]")
+    console.print(f"  [dim]Then press Enter here to scan the output[/dim]")
     console.print()
 
 

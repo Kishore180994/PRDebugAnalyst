@@ -107,7 +107,7 @@ class TerminalBridge:
         return ansi_pattern.sub('', text)
 
     def read_all_logs(self) -> str:
-        """Read entire Terminal A log file."""
+        """Read entire Terminal A log file. Strips ANSI sequences from script output."""
         if not os.path.exists(self.log_file):
             return ""
 
@@ -115,7 +115,7 @@ class TerminalBridge:
             with open(self.log_file, "r", errors="replace") as f:
                 content = f.read()
                 self._last_read_pos = f.tell()
-            return content
+            return self._strip_ansi(content)
         except (PermissionError, OSError):
             return ""
 
