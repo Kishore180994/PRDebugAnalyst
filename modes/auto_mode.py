@@ -16,7 +16,7 @@ Workflow enforced:
 import time
 from typing import Optional
 
-from agents.gemini_client import GeminiClient
+from agents.gemini_client import GeminiClient, GeminiAPIError
 from agents.action_parser import ActionParser, ActionType
 from utils.terminal_bridge import TerminalBridge
 from utils.log_analyzer import LogAnalyzer
@@ -24,6 +24,7 @@ from utils.session_report import SessionState, SummaryParser, ReportGenerator
 from utils.display import (
     section, success, error, warning, info, diminfo, agent_msg,
     verdict_display, progress_spinner, progress_done,
+    progress_cancel, interrupted_msg, user_prompt,
     thinking_start, tool_use, tool_result, work_start, work_end,
     report_success, report_failure, script_generated, session_stats,
     file_edit_preview,
@@ -76,7 +77,12 @@ class AutoMode:
         self._show_historical_summary()
 
         # Phase 1: Initial analysis — verify-first
-        self._initial_analysis()
+        try:
+            self._initial_analysis()
+        except KeyboardInterrupt:
+            progress_cancel()
+            interrupted_msg()
+            info("Initial analysis interrupted. Continuing to main loop.")
 
         # Phase 2: Iterative debugging loop
         work_start("Autonomous debugging")
@@ -88,10 +94,38 @@ class AutoMode:
             try:
                 self._step()
             except KeyboardInterrupt:
-                warning("Auto mode interrupted by user.")
-                self._verdict = ("INTERRUPTED", "User interrupted the auto mode session.")
-                break
+                # Ctrl+C pauses auto mode — ask user what to do
+                progress_cancel()
+                interrupted_msg()
+                action = self._pause_for_user()
+                if action == "quit":
+                    self._verdict = ("INTERRUPTED", "User chose to end the session.")
+                    break
+                elif action == "continue":
+                    continue  # resume auto loop
+                # else "skip" — just move to next iteration
+
+            except GeminiAPIError as e:
+                progress_cancel()
+                self.session.add_step(
+                    f"API error in iteration {self._iteration}",
+                    result="failed",
+                    output_summary=str(e),
+                )
+                if not e.retryable:
+                    error(f"Non-retryable API error: {e}")
+                    self._verdict = ("BUILD_UNFIXABLE_UNKNOWN", f"API error: {e}")
+                    break
+                else:
+                    warning(f"API error: {e}")
+                    if not self.gemini.is_healthy:
+                        error("Too many consecutive API errors. Stopping.")
+                        self._verdict = ("NEEDS_MORE_INVESTIGATION", f"Stopped due to repeated API errors: {e}")
+                        break
+                    info("Will retry on next iteration...")
+
             except Exception as e:
+                progress_cancel()
                 error(f"Error in iteration {self._iteration}: {e}")
                 self.session.add_step(
                     f"Error in iteration {self._iteration}",
@@ -105,7 +139,7 @@ class AutoMode:
                     )
                     agent_msg(response)
                     self._check_verdict(response)
-                except Exception:
+                except (GeminiAPIError, Exception):
                     self._verdict = ("BUILD_UNFIXABLE_UNKNOWN", f"Agent encountered unrecoverable error: {e}")
 
         work_end()
@@ -375,6 +409,37 @@ Start now: summarize historical failures, then suggest the verification build co
         result = ActionParser.extract_verdict(response)
         if result:
             self._verdict = result
+
+    def _pause_for_user(self) -> str:
+        """
+        Called when Ctrl+C is pressed in auto mode.
+        Gives the user a choice: continue, skip current step, or quit.
+        Returns: 'continue', 'skip', or 'quit'.
+        """
+        info("Auto mode paused. What would you like to do?")
+        info("  [c] Continue — resume auto mode")
+        info("  [s] Skip — skip this step, move to next")
+        info("  [q] Quit — end the session")
+        print()
+
+        while True:
+            try:
+                choice = user_prompt("Action (c/s/q): ").strip().lower()
+            except KeyboardInterrupt:
+                # Double Ctrl+C = quit
+                print()
+                return "quit"
+
+            if choice in ("c", "continue", ""):
+                info("Resuming auto mode...")
+                return "continue"
+            elif choice in ("s", "skip"):
+                info("Skipping current step...")
+                return "skip"
+            elif choice in ("q", "quit"):
+                return "quit"
+            else:
+                warning("Please enter c, s, or q.")
 
     def _get_last_agent_response(self) -> str:
         """Get the last agent (model) response from history."""

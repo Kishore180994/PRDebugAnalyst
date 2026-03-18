@@ -49,9 +49,22 @@ class Config:
 
     @classmethod
     def from_env(cls) -> "Config":
-        """Create config from environment variables with sensible defaults."""
-        return cls(
-            gemini_api_key=os.environ.get("GEMINI_API_KEY", ""),
-            main_model=os.environ.get("MAIN_MODEL", "gemini-3-flash-preview"),
-            denoiser_model=os.environ.get("DENOISER_MODEL", "gemini-2.5-flash"),
-        )
+        """
+        Create config from environment variables with sensible defaults.
+        Priority: environment variable > hardcoded default in this class.
+        If you set gemini_api_key directly in this file, it will be used
+        as long as GEMINI_API_KEY env var is not set.
+        """
+        instance = cls()
+        # Only override from env if the env var is actually set
+        env_key = os.environ.get("GEMINI_API_KEY")
+        if env_key:
+            instance.gemini_api_key = env_key
+        # Same for model overrides
+        env_main = os.environ.get("MAIN_MODEL")
+        if env_main:
+            instance.main_model = env_main
+        env_denoiser = os.environ.get("DENOISER_MODEL")
+        if env_denoiser:
+            instance.denoiser_model = env_denoiser
+        return instance

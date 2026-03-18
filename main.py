@@ -19,9 +19,11 @@ from config import Config
 from agents.gemini_client import GeminiClient
 from utils.log_analyzer import LogAnalyzer
 from utils.terminal_bridge import TerminalBridge
+from utils.git_ops import parse_pr_link, setup_project_from_pr
 from utils.display import (
     banner, section, success, error, warning, info,
     user_prompt, log_summary_table, verdict_display,
+    progress_cancel, interrupted_msg,
 )
 from modes.manual_mode import ManualMode
 from modes.auto_mode import AutoMode
@@ -34,12 +36,15 @@ def setup_config() -> Config:
     # ── API Key ─────────────────────────────────────────────────────────
     if not config.gemini_api_key:
         section("API Key Setup")
-        warning("GEMINI_API_KEY environment variable not set.")
+        warning("No API key found.")
+        info("Set GEMINI_API_KEY env var, or edit gemini_api_key in config.py.")
         key = user_prompt("Enter your Gemini API key: ").strip()
         if not key:
-            error("API key is required. Set GEMINI_API_KEY or enter it here.")
+            error("API key is required.")
             sys.exit(1)
         config.gemini_api_key = key
+    else:
+        success("API key loaded")
 
     # ── Tasks Folder ────────────────────────────────────────────────────
     section("Tasks Folder (Historical Build Logs)")
@@ -75,8 +80,8 @@ def get_pr_link() -> str:
             warning("Please enter a valid PR link.")
 
 
-def get_project_path() -> str:
-    """Prompt for the Android project path (where Terminal A operates)."""
+def get_project_path_manual() -> str:
+    """Fallback: Prompt for the Android project path manually."""
     section("Android Project Path")
     info("Enter the path to the Android project directory.")
     info("This is where your project source and build files are located.")
@@ -99,6 +104,44 @@ def get_project_path() -> str:
             return project_path
         else:
             error(f"Directory not found: {project_path}")
+
+
+def setup_project(pr_link: str) -> str:
+    """
+    Set up the project directory from a PR link.
+
+    Flow:
+    1. Parse the PR link to extract repo info
+    2. Ask user for parent directory
+    3. Clone or reuse existing repo
+    4. Checkout the PR branch
+    5. Fall back to manual path entry if anything fails
+    """
+    section("Project Setup")
+
+    pr_info = parse_pr_link(pr_link)
+    if pr_info:
+        info(f"Detected repo: {pr_info.owner}/{pr_info.repo}  PR #{pr_info.pr_number}")
+        project_path = setup_project_from_pr(pr_link)
+        if project_path:
+            # Validate it's an Android project
+            has_gradle = any(
+                os.path.exists(os.path.join(project_path, f))
+                for f in ["build.gradle", "build.gradle.kts", "settings.gradle", "settings.gradle.kts"]
+            )
+            if has_gradle:
+                success(f"Android project ready: {project_path}")
+            else:
+                warning("No gradle files found at project root — may not be an Android project.")
+                info("Continuing anyway...")
+            return project_path
+        else:
+            warning("Auto-setup failed. Falling back to manual entry.")
+    else:
+        warning("Could not parse repo info from PR link.")
+        info("You can enter the project path manually.")
+
+    return get_project_path_manual()
 
 
 def get_log_file_path() -> str:
@@ -191,7 +234,7 @@ def main():
     config = setup_config()
 
     pr_link = get_pr_link()
-    project_path = get_project_path()
+    project_path = setup_project(pr_link)
     mode = select_mode()
 
     # ── Initialize Components ───────────────────────────────────────────
@@ -212,7 +255,13 @@ def main():
     output_dir = os.path.join(config.tasks_folder, "session_reports") if config.tasks_folder else "."
 
     # ── Historical Log Analysis (PR-specific) ───────────────────────────
-    historical_context = analyze_historical_logs(log_analyzer, pr_link, gemini)
+    try:
+        historical_context = analyze_historical_logs(log_analyzer, pr_link, gemini)
+    except KeyboardInterrupt:
+        progress_cancel()
+        interrupted_msg()
+        warning("Historical log search interrupted. Continuing without historical context.")
+        historical_context = "Historical log search was interrupted by user."
 
     # ── Run Selected Mode ───────────────────────────────────────────────
     # Both modes now return a SessionState and handle their own final reports
@@ -239,4 +288,10 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        progress_cancel()
+        print()
+        info("Goodbye!")
+        sys.exit(0)

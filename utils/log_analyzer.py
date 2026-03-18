@@ -223,13 +223,25 @@ class LogAnalyzer:
 
         info(f"Confirmed {len(candidates)} relevant log file(s)")
 
-        # Step 5: Deep analysis of confirmed files
+        # Step 5: Deep analysis of confirmed files (cap to avoid hanging)
+        MAX_ANALYZE = 15  # Don't analyze more than 15 files deeply
+        if len(candidates) > MAX_ANALYZE:
+            warning(f"Too many matches ({len(candidates)}). Analyzing top {MAX_ANALYZE} by size relevance.")
+            # Sort by size (smaller logs are often more focused/useful)
+            candidates.sort(key=lambda e: e.get("size", 0))
+            candidates = candidates[:MAX_ANALYZE]
+
+        progress_spinner(f"Analyzing {len(candidates)} log file(s)")
         results = []
-        for entry in candidates:
-            analysis = self._analyze_log_file(entry["path"])
-            if analysis:
-                analysis["match_source"] = "exact" if entry in exact_matches else "ai_confirmed"
-                results.append(analysis)
+        for i, entry in enumerate(candidates):
+            try:
+                analysis = self._analyze_log_file(entry["path"])
+                if analysis:
+                    analysis["match_source"] = "exact" if entry in exact_matches else "ai_confirmed"
+                    results.append(analysis)
+            except Exception as e:
+                warning(f"Skipping {entry['filename']}: {e}")
+        progress_done(f"{len(results)} analyzed")
 
         return results
 
@@ -465,11 +477,19 @@ If you truly can't identify any candidates, respond: NONE"""
     #  Deep analysis of individual log files
     # ══════════════════════════════════════════════════════════════════════
 
-    def _analyze_log_file(self, filepath: str) -> Optional[dict]:
+    def _analyze_log_file(self, filepath: str, max_size: int = 5_000_000) -> Optional[dict]:
         """Analyze a single log file and extract failure information."""
         try:
+            file_size = os.path.getsize(filepath)
             with open(filepath, "r", errors="replace") as f:
-                content = f.read()
+                if file_size > max_size:
+                    # For huge files, read head + tail
+                    head = f.read(max_size // 2)
+                    f.seek(max(0, file_size - max_size // 2))
+                    tail = f.read()
+                    content = head + "\n...[truncated]...\n" + tail
+                else:
+                    content = f.read()
         except (PermissionError, OSError):
             return None
 

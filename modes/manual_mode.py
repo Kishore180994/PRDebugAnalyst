@@ -16,7 +16,7 @@ Workflow enforced:
 import sys
 import time
 
-from agents.gemini_client import GeminiClient
+from agents.gemini_client import GeminiClient, GeminiAPIError
 from agents.action_parser import ActionParser, ActionType
 from utils.terminal_bridge import TerminalBridge
 from utils.log_analyzer import LogAnalyzer
@@ -25,6 +25,7 @@ from utils.display import (
     section, success, error, warning, info, diminfo, agent_msg,
     user_prompt, command_display, verdict_display, file_edit_preview,
     manual_mode_help, step_prompt, progress_spinner, progress_done,
+    progress_cancel, interrupted_msg,
     thinking_start, tool_use, tool_result, work_start, work_end,
     report_success, report_failure, script_generated, session_stats,
 )
@@ -68,18 +69,34 @@ class ManualMode:
         print()
 
         # Phase 1: Show historical analysis & start verify-first flow
-        self._initial_analysis()
+        try:
+            self._initial_analysis()
+        except KeyboardInterrupt:
+            progress_cancel()
+            interrupted_msg()
+            info("Initial analysis interrupted. You can still interact with the agent.")
 
         # Main interaction loop
         while self._is_running:
             try:
                 self._interaction_loop()
             except KeyboardInterrupt:
-                print()
-                warning("Session interrupted by user.")
-                self.session.finalize("INTERRUPTED", "User interrupted the session.")
-                self._is_running = False
+                # Ctrl+C cancels the current turn, NOT the session
+                progress_cancel()  # stop any active spinner
+                interrupted_msg()
+                # Stay in the loop — user can continue or type 'quit'
+                continue
+            except GeminiAPIError as e:
+                progress_cancel()
+                if not e.retryable:
+                    error(f"API error (non-retryable): {e}")
+                    info("This may require fixing your API key or configuration.")
+                    info("Type 'quit' to exit, or fix the issue and press Enter.")
+                else:
+                    warning(f"API error: {e}")
+                    info("The error may be temporary. Press Enter to retry, or type 'quit'.")
             except Exception as e:
+                progress_cancel()
                 error(f"Error: {e}")
                 info("Type 'quit' to exit or press Enter to continue.")
 

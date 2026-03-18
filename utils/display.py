@@ -139,6 +139,20 @@ def progress_done(label: str = "done"):
         _active_spinner = None
 
 
+def progress_cancel():
+    """Stop the active spinner with a 'cancelled' label (for Ctrl+C)."""
+    global _active_spinner
+    if _active_spinner:
+        _active_spinner.stop(f"  {C.YELLOW}⊘{C.RST} {C.GREY}{_active_spinner.message}{C.RST} {C.DIM}— cancelled{C.RST}")
+        _active_spinner = None
+
+
+def interrupted_msg():
+    """Show a clean 'interrupted' indicator when user presses Ctrl+C."""
+    print(f"\n  {C.YELLOW}⊘{C.RST} {C.YELLOW}Interrupted{C.RST} — returning to prompt")
+    print()
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 #  Banner
 # ═══════════════════════════════════════════════════════════════════════════
@@ -538,9 +552,10 @@ def tool_result(tool_name: str, status: str = "success", detail: str = ""):
 #  Continuous Work Flow — shows the agent actively working
 # ═══════════════════════════════════════════════════════════════════════════
 
-def work_start():
+def work_start(label: str = ""):
     """Visual separator indicating the agent is starting a work block."""
-    print(f"\n  {C.DKGREY}┌{'─' * 50}{C.RST}")
+    suffix = f"  {C.DKGREY}{label}{C.RST}" if label else ""
+    print(f"\n  {C.DKGREY}┌{'─' * 50}{C.RST}{suffix}")
 
 
 def work_step(description: str):
