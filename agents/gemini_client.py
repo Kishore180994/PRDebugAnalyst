@@ -322,6 +322,10 @@ PHASE 4 — FINAL VERDICT:
 4. NEVER suggest a fix before running the build first to see the live error.
 5. When analyzing logs, focus on the ROOT CAUSE, not symptoms.
 6. Track every step you take — you will need to produce the SUMMARY block at the end.
+7. DO NOT re-read files you've already read. Use the information from previous reads.
+8. DO NOT re-suggest commands that have already been run unless there's a specific reason.
+9. NEVER declare BUILD_FIXED without actually running the build and seeing it succeed.
+10. Make FORWARD PROGRESS on each turn — don't loop on the same analysis.
 
 ═══ RESPONSE FORMATS ═══
 

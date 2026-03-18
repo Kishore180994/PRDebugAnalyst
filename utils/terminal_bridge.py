@@ -1,11 +1,16 @@
 """
 Terminal Bridge - Handles communication between Terminal A (project) and Terminal B (agent).
 Manages log file watching and command execution for both manual and auto modes.
+
+Uses the `script` command for terminal session recording in manual mode,
+which captures all terminal output (including interactive programs) without
+requiring the user to append `tee` to every command.
 """
 import os
 import subprocess
 import time
 import tempfile
+import platform
 from pathlib import Path
 from typing import Optional
 
@@ -15,8 +20,8 @@ class TerminalBridge:
     Bridge between the agent (Terminal B) and the project terminal (Terminal A).
 
     In manual mode:
-        - Displays commands for the user to run in Terminal A
-        - Reads log output from a shared log file
+        - Uses `script` command to record Terminal A session to a log file
+        - Reads log output from the script-generated typescript file
 
     In auto mode:
         - Executes commands directly via subprocess
@@ -39,23 +44,42 @@ class TerminalBridge:
 
     # ── Manual Mode Helpers ─────────────────────────────────────────────
 
+    def get_script_command(self) -> str:
+        """
+        Return the `script` command that the user should run in Terminal A
+        to start recording their session. This captures ALL terminal output
+        automatically — no need to append tee/redirect to each command.
+        """
+        system = platform.system()
+        if system == "Darwin":
+            # macOS: script -a -F <file>  (-F flushes after each write)
+            return f'script -a -F "{self.log_file}"'
+        elif system == "Linux":
+            # Linux: script -a -f <file>  (-f flushes after each write)
+            return f'script -a -f "{self.log_file}"'
+        else:
+            # Fallback for other systems
+            return f'script -a "{self.log_file}"'
+
+    def get_stop_script_hint(self) -> str:
+        """How to stop the script recording session."""
+        return "Type 'exit' or press Ctrl+D to stop recording."
+
     def format_command_for_user(self, command: str) -> str:
         """Format a command for the user to copy-paste into Terminal A."""
-        # Wrap with logging redirect so output goes to our log file
-        logged_cmd = f'({command}) 2>&1 | tee -a "{self.log_file}"'
-
         return (
             f"\n{'─' * 60}\n"
-            f"  📋 Run this in Terminal A:\n"
+            f"  Run this in Terminal A:\n"
             f"{'─' * 60}\n"
             f"\n  {command}\n"
-            f"\n  (With logging): \n"
-            f"  {logged_cmd}\n"
             f"{'─' * 60}\n"
         )
 
     def read_new_logs(self) -> str:
-        """Read any new content from the Terminal A log file."""
+        """
+        Read any new content from the Terminal A log file.
+        Strips ANSI escape sequences that `script` command captures.
+        """
         if not os.path.exists(self.log_file):
             return ""
 
@@ -64,9 +88,23 @@ class TerminalBridge:
                 f.seek(self._last_read_pos)
                 new_content = f.read()
                 self._last_read_pos = f.tell()
-            return new_content
+            return self._strip_ansi(new_content)
         except (PermissionError, OSError):
             return ""
+
+    @staticmethod
+    def _strip_ansi(text: str) -> str:
+        """Remove ANSI escape sequences from text (produced by `script` command)."""
+        import re
+        # Strip ANSI escape sequences: CSI sequences, OSC sequences, and simple escapes
+        ansi_pattern = re.compile(
+            r'\x1b\[[0-9;]*[a-zA-Z]'   # CSI sequences (colors, cursor, etc.)
+            r'|\x1b\][^\x07]*\x07'      # OSC sequences (title bar, etc.)
+            r'|\x1b[()][A-Z0-9]'        # Character set selection
+            r'|\x1b[>=<]'               # Keypad/cursor modes
+            r'|\r'                       # Carriage returns (script often has \r\n)
+        )
+        return ansi_pattern.sub('', text)
 
     def read_all_logs(self) -> str:
         """Read entire Terminal A log file."""

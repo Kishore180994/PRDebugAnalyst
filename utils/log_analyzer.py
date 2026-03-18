@@ -290,6 +290,9 @@ class LogAnalyzer:
         """
         Score how likely a file is related to the target PR.
         0 = no match, 1 = possible, 2+ = strong match.
+
+        Uses word-boundary matching for numeric identifiers to prevent
+        false positives (e.g., "185" matching "18585" or "1856").
         """
         score = 0
         search_text = (
@@ -297,6 +300,7 @@ class LogAnalyzer:
             file_entry.get("head_preview", "").lower() + "\n" +
             " ".join(file_entry.get("pr_refs", [])).lower()
         )
+        rel_path_lower = file_entry["rel_path"].lower()
 
         for identifier in pr_identifiers:
             ident_lower = identifier.lower()
@@ -304,14 +308,33 @@ class LogAnalyzer:
             # Full URL match in content → strong
             if ident_lower.startswith("http") and ident_lower in search_text:
                 score += 3
+                continue
 
-            # PR number match in refs → strong
-            elif ident_lower in search_text:
-                score += 1
-
-            # Check in filename/directory specifically (stronger signal)
-            if ident_lower in file_entry["rel_path"].lower():
-                score += 2
+            # For pure numeric identifiers, use word-boundary regex to avoid
+            # "185" matching "18585", "1856", etc.
+            if ident_lower.isdigit():
+                pattern = r'(?<![0-9])' + re.escape(ident_lower) + r'(?![0-9])'
+                if re.search(pattern, search_text):
+                    score += 1
+                if re.search(pattern, rel_path_lower):
+                    score += 2
+            else:
+                # Non-numeric identifiers that end with a number (e.g., "PR-185", "pull/185")
+                # also need boundary matching to avoid "PR-185" matching "PR-18585"
+                trailing_num = re.search(r'(\d+)$', ident_lower)
+                if trailing_num:
+                    # Use regex with numeric boundary at the end
+                    pattern = re.escape(ident_lower) + r'(?![0-9])'
+                    if re.search(pattern, search_text):
+                        score += 1
+                    if re.search(pattern, rel_path_lower):
+                        score += 2
+                else:
+                    # Purely non-numeric: safe to use substring match
+                    if ident_lower in search_text:
+                        score += 1
+                    if ident_lower in rel_path_lower:
+                        score += 2
 
         return score
 

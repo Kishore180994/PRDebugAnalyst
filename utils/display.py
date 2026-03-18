@@ -1,81 +1,122 @@
 """
 Display utilities for the PR Debug Analyst CLI interface.
-Polished, Claude Code-style terminal UI with:
+Built on the `rich` library for polished, Claude Code-style terminal UI.
+
+Features:
+  - Rich markdown rendering for agent messages
   - Animated spinners
-  - Box-drawing layout
-  - Markdown-aware agent message rendering
-  - Gradient-like color accents
-  - Clean, minimal design language
+  - Clean panels for commands, edits, verdicts
+  - Auto-copy to clipboard for single commands
+  - Copyable plain-text command blocks (no box-drawing interference)
 """
-import sys
 import os
-import re
-import time
-import threading
+import sys
+import platform
+import subprocess
 import shutil
 from typing import Optional
 
+from rich.console import Console
+from rich.markdown import Markdown
+from rich.panel import Panel
+from rich.text import Text
+from rich.rule import Rule
+from rich.table import Table
+from rich.columns import Columns
+from rich.syntax import Syntax
+from rich.spinner import Spinner as RichSpinner
+from rich.live import Live
+from rich.theme import Theme
+from rich import box
+
+import threading
+import time
+
 # ═══════════════════════════════════════════════════════════════════════════
-#  Color System — muted, professional palette inspired by Claude Code
+#  Theme & Console
 # ═══════════════════════════════════════════════════════════════════════════
 
-class C:
-    """Compact color/style codes. Muted palette, not garish."""
-    RST     = "\033[0m"
-    BOLD    = "\033[1m"
-    DIM     = "\033[2m"
-    ITALIC  = "\033[3m"
-    ULINE   = "\033[4m"
-    STRIKE  = "\033[9m"
+_THEME = Theme({
+    "info":        "dim",
+    "info.label":  "dim cyan",
+    "success":     "green",
+    "warning":     "yellow",
+    "error":       "red",
+    "agent":       "medium_purple1",
+    "agent.name":  "bold medium_purple1",
+    "thinking":    "dim italic",
+    "tool":        "cyan",
+    "tool.name":   "bold cyan",
+    "command":     "bold white on grey23",
+    "command.label": "bold yellow",
+    "file":        "bold white",
+    "dim":         "dim",
+    "verdict.pass": "bold green",
+    "verdict.fail": "bold red",
+    "step":        "bold blue",
+    "section":     "bold blue",
+})
 
-    # Foreground — 256-color for subtlety
-    WHITE   = "\033[97m"
-    GREY    = "\033[38;5;245m"
-    DKGREY  = "\033[38;5;240m"
-    BLACK   = "\033[30m"
+console = Console(theme=_THEME, highlight=False)
 
-    # Accent colors — softer tones
-    BLUE    = "\033[38;5;75m"     # primary accent (like claude blue)
-    CYAN    = "\033[38;5;116m"    # secondary accent
-    GREEN   = "\033[38;5;114m"    # success
-    RED     = "\033[38;5;203m"    # error
-    YELLOW  = "\033[38;5;222m"    # warning
-    ORANGE  = "\033[38;5;215m"    # highlight
-    PURPLE  = "\033[38;5;141m"    # agent color
-    PINK    = "\033[38;5;211m"    # emphasis
+# ═══════════════════════════════════════════════════════════════════════════
+#  Clipboard Utility
+# ═══════════════════════════════════════════════════════════════════════════
 
-    # Background accents
-    BG_DARK   = "\033[48;5;236m"
-    BG_DARKER = "\033[48;5;234m"
-    BG_BLUE   = "\033[48;5;24m"
-    BG_GREEN  = "\033[48;5;22m"
-    BG_RED    = "\033[48;5;52m"
-    BG_YELLOW = "\033[48;5;58m"
+def _copy_to_clipboard(text: str) -> bool:
+    """
+    Copy text to system clipboard. Returns True on success.
+    Uses native OS commands for reliability (no X server needed for macOS).
+    """
+    text = text.strip()
 
+    # macOS
+    if platform.system() == "Darwin":
+        try:
+            subprocess.run(["pbcopy"], input=text.encode(), check=True,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            return True
+        except (FileNotFoundError, subprocess.CalledProcessError):
+            pass
 
-def _term_width() -> int:
-    """Get terminal width, default 80."""
+    # Linux — try xclip, then xsel, then wl-copy (Wayland)
+    if platform.system() == "Linux":
+        for cmd in [["xclip", "-selection", "clipboard"],
+                    ["xsel", "--clipboard", "--input"],
+                    ["wl-copy"]]:
+            try:
+                subprocess.run(cmd, input=text.encode(), check=True,
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                return True
+            except (FileNotFoundError, subprocess.CalledProcessError):
+                continue
+
+    # Windows
+    if platform.system() == "Windows":
+        try:
+            subprocess.run(["clip"], input=text.encode(), check=True,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            return True
+        except (FileNotFoundError, subprocess.CalledProcessError):
+            pass
+
+    # Fallback: pyperclip
     try:
-        return shutil.get_terminal_size().columns
+        import pyperclip
+        pyperclip.copy(text)
+        return True
     except Exception:
-        return 80
+        pass
+
+    return False
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-#  Animated Spinner
+#  Animated Spinner (background thread, compatible with old API)
 # ═══════════════════════════════════════════════════════════════════════════
 
-class Spinner:
-    """
-    Animated terminal spinner that runs in a background thread.
-    Usage:
-        with Spinner("Thinking"):
-            do_work()
-    Or:
-        spinner = Spinner("Analyzing"); spinner.start()
-        ...
-        spinner.stop()
-    """
+class _Spinner:
+    """Background-thread spinner using rich."""
     FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
 
     def __init__(self, message: str = ""):
@@ -88,38 +129,30 @@ class Spinner:
         self._thread = threading.Thread(target=self._spin, daemon=True)
         self._thread.start()
 
-    def stop(self, final: str = ""):
+    def stop(self, final_line: str = ""):
         self._running = False
         if self._thread:
             self._thread.join(timeout=1)
-        # Clear the spinner line
+        # Clear spinner line
         sys.stdout.write(f"\r\033[K")
         sys.stdout.flush()
-        if final:
-            sys.stdout.write(final + "\n")
-            sys.stdout.flush()
+        if final_line:
+            console.print(final_line)
 
     def _spin(self):
         i = 0
         while self._running:
             frame = self.FRAMES[i % len(self.FRAMES)]
-            sys.stdout.write(
-                f"\r  {C.BLUE}{frame}{C.RST} {C.GREY}{self.message}{C.RST}"
-            )
+            sys.stdout.write(f"\r  [cyan]{frame}[/] [dim]{self.message}[/]"
+                             .replace("[cyan]", "\033[36m")
+                             .replace("[/]", "\033[0m")
+                             .replace("[dim]", "\033[2m"))
             sys.stdout.flush()
             time.sleep(0.08)
             i += 1
 
-    def __enter__(self):
-        self.start()
-        return self
 
-    def __exit__(self, *args):
-        self.stop()
-
-
-# Global spinner instance for progress_spinner / progress_done pattern
-_active_spinner: Optional[Spinner] = None
+_active_spinner: Optional[_Spinner] = None
 
 
 def progress_spinner(msg: str):
@@ -127,30 +160,31 @@ def progress_spinner(msg: str):
     global _active_spinner
     if _active_spinner:
         _active_spinner.stop()
-    _active_spinner = Spinner(msg)
+    _active_spinner = _Spinner(msg)
     _active_spinner.start()
 
 
 def progress_done(label: str = "done"):
-    """Stop the active spinner with a success label."""
+    """Stop the active spinner with a success checkmark."""
     global _active_spinner
     if _active_spinner:
-        _active_spinner.stop(f"  {C.GREEN}✓{C.RST} {C.GREY}{_active_spinner.message}{C.RST} {C.DIM}— {label}{C.RST}")
+        _active_spinner.stop(f"  [green]✓[/green] [dim]{_active_spinner.message}[/dim] [dim]— {label}[/dim]")
         _active_spinner = None
 
 
 def progress_cancel():
-    """Stop the active spinner with a 'cancelled' label (for Ctrl+C)."""
+    """Stop the active spinner with a 'cancelled' label."""
     global _active_spinner
     if _active_spinner:
-        _active_spinner.stop(f"  {C.YELLOW}⊘{C.RST} {C.GREY}{_active_spinner.message}{C.RST} {C.DIM}— cancelled{C.RST}")
+        _active_spinner.stop(f"  [yellow]⊘[/yellow] [dim]{_active_spinner.message}[/dim] [dim]— cancelled[/dim]")
         _active_spinner = None
 
 
 def interrupted_msg():
-    """Show a clean 'interrupted' indicator when user presses Ctrl+C."""
-    print(f"\n  {C.YELLOW}⊘{C.RST} {C.YELLOW}Interrupted{C.RST} — returning to prompt")
-    print()
+    """Show a clean interrupted indicator."""
+    console.print()
+    console.print("  [yellow]⊘[/yellow] [yellow]Interrupted[/yellow] — returning to prompt")
+    console.print()
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -158,13 +192,12 @@ def interrupted_msg():
 # ═══════════════════════════════════════════════════════════════════════════
 
 def banner():
-    """Print the application banner — clean, compact, Claude Code-style."""
-    w = min(_term_width(), 72)
-    print()
-    print(f"  {C.BLUE}{C.BOLD}PR Debug Analyst{C.RST}  {C.DKGREY}v1.0{C.RST}")
-    print(f"  {C.DKGREY}AI-powered Android build failure debugger • Gemini{C.RST}")
-    print(f"  {C.DKGREY}{'─' * (w - 4)}{C.RST}")
-    print()
+    """Print the application banner."""
+    console.print()
+    console.print("  [bold blue]PR Debug Analyst[/bold blue]  [dim]v1.0[/dim]")
+    console.print("  [dim]AI-powered Android build failure debugger • Gemini[/dim]")
+    console.print(Rule(style="dim blue"))
+    console.print()
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -172,16 +205,15 @@ def banner():
 # ═══════════════════════════════════════════════════════════════════════════
 
 def section(title: str):
-    """Print a clean section divider."""
-    w = min(_term_width(), 72)
-    print()
-    print(f"  {C.BLUE}{C.BOLD}{'─' * 2} {title} {'─' * max(1, w - len(title) - 7)}{C.RST}")
-    print()
+    """Print a section divider."""
+    console.print()
+    console.print(Rule(f"[bold blue] {title} [/bold blue]", style="blue"))
+    console.print()
 
 
 def subsection(title: str):
     """Print a lighter subsection header."""
-    print(f"\n  {C.CYAN}{title}{C.RST}")
+    console.print(f"\n  [cyan]{title}[/cyan]")
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -189,146 +221,41 @@ def subsection(title: str):
 # ═══════════════════════════════════════════════════════════════════════════
 
 def success(msg: str):
-    print(f"  {C.GREEN}✓{C.RST} {msg}")
+    console.print(f"  [green]✓[/green] {msg}")
 
 def error(msg: str):
-    print(f"  {C.RED}✗{C.RST} {msg}")
+    console.print(f"  [red]✗[/red] {msg}")
 
 def warning(msg: str):
-    print(f"  {C.YELLOW}!{C.RST} {C.YELLOW}{msg}{C.RST}")
+    console.print(f"  [yellow]![/yellow] [yellow]{msg}[/yellow]")
 
 def info(msg: str):
-    print(f"  {C.DKGREY}│{C.RST} {msg}")
+    console.print(f"  [dim]│[/dim] {msg}")
 
 def diminfo(msg: str):
     """Even more subtle info line."""
-    print(f"  {C.DKGREY}│ {msg}{C.RST}")
+    console.print(f"  [dim]│ {msg}[/dim]")
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-#  Agent Message — Markdown-aware rendering
+#  Agent Message — Rich Markdown rendering
 # ═══════════════════════════════════════════════════════════════════════════
 
 def agent_msg(msg: str):
-    """
-    Render the AI agent's message with lightweight markdown formatting.
-    Handles: **bold**, `code`, ```code blocks```, headers, bullet points.
-    """
-    print()
-    print(f"  {C.PURPLE}╭─{C.RST} {C.PURPLE}{C.BOLD}Agent{C.RST}")
-
-    lines = msg.split("\n")
-    in_code_block = False
-    code_lang = ""
-
-    for line in lines:
-        # Code block fences
-        if line.strip().startswith("```"):
-            if not in_code_block:
-                in_code_block = True
-                code_lang = line.strip()[3:].strip()
-                lang_label = f" {C.DKGREY}{code_lang}{C.RST}" if code_lang else ""
-                print(f"  {C.PURPLE}│{C.RST}  {C.BG_DARK} {lang_label}")
-            else:
-                in_code_block = False
-                print(f"  {C.PURPLE}│{C.RST}  {C.BG_DARK}  {C.RST}")
-            continue
-
-        if in_code_block:
-            # Code lines — monospace feel with dark background
-            print(f"  {C.PURPLE}│{C.RST}  {C.BG_DARK} {C.GREEN}{line}{C.RST}")
-            continue
-
-        # Empty lines
-        if not line.strip():
-            print(f"  {C.PURPLE}│{C.RST}")
-            continue
-
-        # Render the line with inline formatting
-        rendered = _render_inline_markdown(line)
-
-        # SUMMARY_START/END — dim these
-        if line.strip() in ("SUMMARY_START", "SUMMARY_END"):
-            print(f"  {C.PURPLE}│{C.RST}  {C.DKGREY}{line.strip()}{C.RST}")
-            continue
-
-        # VERDICT/REASON lines — highlight
-        if line.strip().startswith("VERDICT:"):
-            verdict_val = line.strip()[8:].strip()
-            vc = C.GREEN if "FIXED" in verdict_val else C.RED
-            print(f"  {C.PURPLE}│{C.RST}  {vc}{C.BOLD}VERDICT: {verdict_val}{C.RST}")
-            continue
-        if line.strip().startswith("REASON:"):
-            print(f"  {C.PURPLE}│{C.RST}  {C.GREY}REASON: {line.strip()[7:].strip()}{C.RST}")
-            continue
-
-        # Headers (## or **)
-        stripped = line.strip()
-        if stripped.startswith("#"):
-            header_text = stripped.lstrip("#").strip()
-            print(f"  {C.PURPLE}│{C.RST}  {C.BOLD}{C.WHITE}{header_text}{C.RST}")
-            continue
-
-        # Bullet points
-        if stripped.startswith("- ") or stripped.startswith("* "):
-            bullet_text = _render_inline_markdown(stripped[2:])
-            indent = len(line) - len(line.lstrip())
-            pad = " " * (indent // 2)
-            print(f"  {C.PURPLE}│{C.RST}  {pad}{C.BLUE}•{C.RST} {bullet_text}")
-            continue
-
-        # Numbered list
-        num_match = re.match(r"^(\d+)\.\s+(.+)", stripped)
-        if num_match:
-            num = num_match.group(1)
-            rest = _render_inline_markdown(num_match.group(2))
-            print(f"  {C.PURPLE}│{C.RST}  {C.BLUE}{num}.{C.RST} {rest}")
-            continue
-
-        # Table rows (| col | col |)
-        if stripped.startswith("|") and stripped.endswith("|"):
-            if re.match(r"^\|[\s\-:|]+\|$", stripped):
-                # Separator row
-                print(f"  {C.PURPLE}│{C.RST}  {C.DKGREY}{stripped}{C.RST}")
-            else:
-                print(f"  {C.PURPLE}│{C.RST}  {C.GREY}{stripped}{C.RST}")
-            continue
-
-        # Summary block fields
-        if re.match(r"^\s*(status|pr|root_cause|fix_applied|why_unfixable|steps_tried|files_changed):", stripped):
-            key_match = re.match(r"^(\s*\S+:)\s*(.*)", stripped)
-            if key_match:
-                print(f"  {C.PURPLE}│{C.RST}  {C.DKGREY}{key_match.group(1)}{C.RST} {key_match.group(2)}")
-                continue
-
-        # Regular text
-        print(f"  {C.PURPLE}│{C.RST}  {rendered}")
-
-    print(f"  {C.PURPLE}╰─{C.RST}")
-    print()
-
-
-def _render_inline_markdown(text: str) -> str:
-    """Apply inline markdown formatting: **bold**, `code`, *italic*."""
-    # Bold: **text** or __text__
-    text = re.sub(
-        r"\*\*(.+?)\*\*",
-        lambda m: f"{C.BOLD}{C.WHITE}{m.group(1)}{C.RST}",
-        text,
+    """Render the AI agent's response using rich Markdown inside a panel."""
+    console.print()
+    md = Markdown(msg, code_theme="monokai")
+    console.print(
+        Panel(
+            md,
+            title="[bold medium_purple1]Agent[/bold medium_purple1]",
+            title_align="left",
+            border_style="medium_purple1",
+            padding=(1, 2),
+            expand=True,
+        )
     )
-    # Inline code: `text`
-    text = re.sub(
-        r"`([^`]+)`",
-        lambda m: f"{C.BG_DARK}{C.ORANGE} {m.group(1)} {C.RST}",
-        text,
-    )
-    # Italic: *text* (but not **)
-    text = re.sub(
-        r"(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)",
-        lambda m: f"{C.ITALIC}{m.group(1)}{C.RST}",
-        text,
-    )
-    return text
+    console.print()
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -338,32 +265,68 @@ def _render_inline_markdown(text: str) -> str:
 def user_prompt(prompt_text: str = "") -> str:
     """Show a styled user input prompt."""
     if prompt_text:
-        print(f"  {C.DKGREY}{prompt_text}{C.RST}")
+        console.print(f"  [dim]{prompt_text}[/dim]")
     try:
-        return input(f"  {C.BLUE}{C.BOLD}❯{C.RST} ")
+        return input("  \033[1;34m❯\033[0m ")
     except EOFError:
         return "quit"
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-#  Command Display — the box users copy-paste from
+#  Command Display — copyable, with auto-clipboard
 # ═══════════════════════════════════════════════════════════════════════════
 
-def command_display(command: str, log_file: str = ""):
-    """Display a command in a clean, copy-friendly box."""
-    w = min(_term_width(), 72) - 6
-    print()
-    print(f"  {C.YELLOW}┌─{C.RST} {C.YELLOW}{C.BOLD}Run in Terminal A{C.RST}")
-    print(f"  {C.YELLOW}│{C.RST}")
-    print(f"  {C.YELLOW}│{C.RST}  {C.BG_DARK} {C.WHITE}{C.BOLD}  {command}  {C.RST}")
-    print(f"  {C.YELLOW}│{C.RST}")
+def command_display(command: str, log_file: str = "", auto_copy: bool = True):
+    """
+    Display a command for the user to run in Terminal A.
+
+    The command is printed as plain text (no box-drawing around the actual
+    command string) so terminal copy-paste grabs just the command.
+
+    If auto_copy=True and this is a single command, it is automatically
+    copied to the clipboard.
+    """
+    console.print()
+    console.print("  [bold yellow]Run in Terminal A:[/bold yellow]")
+    console.print()
+
+    # Print the raw command as plain text — easy to triple-click & copy
+    console.print(f"  {command}")
+
+    console.print()
     if log_file:
         logged = f'({command}) 2>&1 | tee -a "{log_file}"'
-        print(f"  {C.YELLOW}│{C.RST}  {C.DKGREY}with logging:{C.RST}")
-        print(f"  {C.YELLOW}│{C.RST}  {C.DKGREY}{logged}{C.RST}")
-        print(f"  {C.YELLOW}│{C.RST}")
-    print(f"  {C.YELLOW}╰─{C.RST}")
-    print()
+        console.print(f"  [dim]with logging:[/dim]")
+        console.print(f"  [dim]{logged}[/dim]")
+        console.print()
+
+    # Auto-copy to clipboard
+    if auto_copy:
+        if _copy_to_clipboard(command):
+            console.print(f"  [green]✓[/green] [dim]Copied to clipboard[/dim]")
+        else:
+            console.print(f"  [dim]ℹ Tip: triple-click the command line to select & copy[/dim]")
+
+    console.print()
+
+
+def commands_display(commands: list[str], log_file: str = ""):
+    """
+    Display multiple commands. Does NOT auto-copy (user picks which to copy).
+    Each command is on its own line for easy individual selection.
+    """
+    console.print()
+    console.print("  [bold yellow]Run in Terminal A:[/bold yellow]")
+    console.print()
+
+    for i, cmd in enumerate(commands, 1):
+        console.print(f"  [dim]{i}.[/dim] {cmd}")
+
+    console.print()
+    if log_file:
+        console.print(f"  [dim]Tip: append[/dim] 2>&1 | tee -a \"{log_file}\" [dim]to capture logs[/dim]")
+    console.print(f"  [dim]ℹ Select a command line to copy it[/dim]")
+    console.print()
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -371,32 +334,24 @@ def command_display(command: str, log_file: str = ""):
 # ═══════════════════════════════════════════════════════════════════════════
 
 def verdict_display(verdict: str, reason: str):
-    """Display the final verdict in a prominent box."""
+    """Display the final verdict prominently."""
     is_success = verdict == "BUILD_FIXED"
-    accent = C.GREEN if is_success else C.RED
-    bg = C.BG_GREEN if is_success else C.BG_RED
+    style = "green" if is_success else "red"
     icon = "✅" if is_success else "❌"
-    w = min(_term_width(), 72) - 4
 
-    print()
-    print(f"  {accent}{'━' * w}{C.RST}")
-    print()
-    print(f"  {accent}{C.BOLD}  {icon}  {verdict}{C.RST}")
-    print()
+    verdict_text = Text()
+    verdict_text.append(f"  {icon}  {verdict}\n\n", style=f"bold {style}")
     if reason:
-        # Word-wrap reason
-        words = reason.split()
-        line = "  "
-        for word in words:
-            if len(line) + len(word) + 1 > w:
-                print(f"  {C.GREY}{line}{C.RST}")
-                line = "  "
-            line += word + " "
-        if line.strip():
-            print(f"  {C.GREY}{line}{C.RST}")
-    print()
-    print(f"  {accent}{'━' * w}{C.RST}")
-    print()
+        verdict_text.append(f"  {reason}", style="dim")
+
+    console.print()
+    console.print(Panel(
+        verdict_text,
+        border_style=style,
+        padding=(1, 2),
+        expand=True,
+    ))
+    console.print()
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -404,7 +359,7 @@ def verdict_display(verdict: str, reason: str):
 # ═══════════════════════════════════════════════════════════════════════════
 
 def log_summary_table(log_summaries: list[dict]):
-    """Display historical log summaries in a clean format."""
+    """Display historical log summaries in a rich table."""
     if not log_summaries:
         warning("No log files found in the tasks folder.")
         return
@@ -420,30 +375,28 @@ def log_summary_table(log_summaries: list[dict]):
         match_source = log.get("match_source", "")
         pr_refs = log.get("pr_refs_in_file", [])
 
-        # Header with badge
-        badge = ""
-        if match_source:
-            badge = f"  {C.BG_DARK} {C.GREEN}{match_source}{C.RST}"
-        print(f"  {C.BLUE}{C.BOLD}{i}.{C.RST} {C.WHITE}{C.BOLD}{pr_id}{C.RST}  {C.DKGREY}{rel_path}{C.RST}{badge}")
+        # Header
+        badge = f"  [on grey23][green]{match_source}[/green][/on grey23]" if match_source else ""
+        console.print(f"  [bold blue]{i}.[/bold blue] [bold white]{pr_id}[/bold white]  [dim]{rel_path}[/dim]{badge}")
 
         # PR refs
         if pr_refs:
             refs_str = ", ".join(pr_refs[:3])
-            print(f"     {C.DKGREY}refs: {refs_str}{C.RST}")
+            console.print(f"     [dim]refs: {refs_str}[/dim]")
 
         # Errors
         if errors:
             for err in errors[:3]:
-                print(f"     {C.RED}•{C.RST} {err['type']}  {C.DKGREY}×{err['count']}{C.RST}")
+                console.print(f"     [red]•[/red] {err['type']}  [dim]×{err['count']}[/dim]")
         else:
-            print(f"     {C.DKGREY}no recognized error patterns{C.RST}")
+            console.print(f"     [dim]no recognized error patterns[/dim]")
 
         # Failed tasks
         if failed_tasks:
             tasks_str = ", ".join(failed_tasks[:5])
-            print(f"     {C.YELLOW}failed:{C.RST} {tasks_str}")
+            console.print(f"     [yellow]failed:[/yellow] {tasks_str}")
 
-        print()
+        console.print()
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -452,14 +405,19 @@ def log_summary_table(log_summaries: list[dict]):
 
 def manual_mode_help():
     """Display the manual mode action reference."""
-    print()
-    print(f"  {C.DKGREY}Actions:{C.RST}")
-    print(f"  {C.BG_DARK} {C.WHITE}Enter{C.RST}  {C.RST} Scan logs → denoise → feed to agent")
-    print(f"  {C.BG_DARK} {C.GREEN}done {C.RST}  {C.RST} Mark step as successful")
-    print(f"  {C.BG_DARK} {C.RED}fail {C.RST}  {C.RST} Mark step as failed")
-    print(f"  {C.BG_DARK} {C.YELLOW}quit {C.RST}  {C.RST} Exit session")
-    print(f"  {C.DKGREY}Or type any message to chat with the agent{C.RST}")
-    print()
+    console.print()
+    table = Table(show_header=False, box=None, padding=(0, 2), show_edge=False)
+    table.add_column("Key", style="bold white on grey23", min_width=8, justify="center")
+    table.add_column("Action")
+
+    table.add_row("Enter",  "Scan logs → denoise → feed to agent")
+    table.add_row("done",   "[green]Mark step as successful[/green]")
+    table.add_row("fail",   "[red]Mark step as failed[/red]")
+    table.add_row("quit",   "[yellow]Exit session[/yellow]")
+
+    console.print(table)
+    console.print("  [dim]Or type any message to chat with the agent[/dim]")
+    console.print()
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -468,232 +426,245 @@ def manual_mode_help():
 
 def step_prompt(step_num: int):
     """Display the step indicator before user input."""
-    print(f"\n  {C.DKGREY}{'─' * 44}{C.RST}")
-    print(f"  {C.BLUE}Step {step_num}{C.RST}  {C.DKGREY}enter · done · fail · quit · or type{C.RST}")
+    console.print()
+    console.print(Rule(style="dim"))
+    console.print(f"  [bold blue]Step {step_num}[/bold blue]  [dim]enter · done · fail · quit · or type[/dim]")
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-#  File diff display (for edits)
+#  File edit preview
 # ═══════════════════════════════════════════════════════════════════════════
 
 def file_edit_preview(filepath: str, content: str, max_lines: int = 15):
-    """Show a preview of a file edit the agent wants to make."""
-    print()
-    print(f"  {C.ORANGE}┌─{C.RST} {C.ORANGE}{C.BOLD}Edit: {filepath}{C.RST}")
+    """Show a preview of a file edit."""
     lines = content.split("\n")
-    shown = lines[:max_lines]
-    for line in shown:
-        print(f"  {C.ORANGE}│{C.RST}  {C.BG_DARK} {C.GREEN}{line}{C.RST}")
+    shown = "\n".join(lines[:max_lines])
+    overflow = ""
     if len(lines) > max_lines:
-        print(f"  {C.ORANGE}│{C.RST}  {C.DKGREY}... +{len(lines) - max_lines} more lines{C.RST}")
-    print(f"  {C.ORANGE}╰─{C.RST}")
-    print()
+        overflow = f"\n[dim]... +{len(lines) - max_lines} more lines[/dim]"
+
+    # Try to guess language from filepath
+    lang = "groovy"
+    if filepath.endswith(".kts"):
+        lang = "kotlin"
+    elif filepath.endswith(".properties"):
+        lang = "properties"
+    elif filepath.endswith(".toml"):
+        lang = "toml"
+    elif filepath.endswith(".xml"):
+        lang = "xml"
+    elif filepath.endswith(".pro") or filepath.endswith(".cfg"):
+        lang = "text"
+
+    syntax = Syntax(shown, lang, theme="monokai", line_numbers=False, padding=1)
+
+    console.print()
+    console.print(Panel(
+        syntax,
+        title=f"[bold orange1]Edit: {filepath}[/bold orange1]",
+        title_align="left",
+        subtitle=overflow if overflow else None,
+        border_style="orange1",
+        padding=(0, 1),
+    ))
+    console.print()
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-#  Thinking Block — collapsible-style thinking indicator
+#  Thinking Block
 # ═══════════════════════════════════════════════════════════════════════════
 
 def thinking_start(topic: str = ""):
-    """Show the start of a thinking/reasoning block (like Claude Code's thinking)."""
+    """Show the start of a thinking/reasoning block."""
     label = f" {topic}" if topic else ""
-    print(f"\n  {C.DKGREY}▸ thinking{label}...{C.RST}")
+    console.print(f"\n  [dim italic]▸ thinking{label}...[/dim italic]")
 
 
 def thinking_end():
     """Close a thinking block."""
-    pass  # The spinner stop handles the visual transition
+    pass
 
 
 def thinking_summary(text: str, max_lines: int = 3):
-    """
-    Show a collapsed summary of what the agent was thinking about.
-    Like Claude Code's thinking block — dimmed, brief.
-    """
+    """Show a collapsed thinking summary."""
     lines = text.strip().split("\n")[:max_lines]
-    print(f"  {C.DKGREY}▸ reasoning{C.RST}")
+    console.print("  [dim]▸ reasoning[/dim]")
     for line in lines:
-        # Truncate long lines
         display_line = line[:80] + "..." if len(line) > 80 else line
-        print(f"    {C.DKGREY}{display_line}{C.RST}")
+        console.print(f"    [dim]{display_line}[/dim]")
     if len(text.strip().split("\n")) > max_lines:
-        print(f"    {C.DKGREY}...{C.RST}")
-    print()
+        console.print("    [dim]...[/dim]")
+    console.print()
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-#  Tool Use Indicators — like Claude Code's tool call display
+#  Tool Use Indicators
 # ═══════════════════════════════════════════════════════════════════════════
 
 def tool_use(tool_name: str, detail: str = ""):
-    """
-    Show a tool being invoked, Claude Code style.
-    E.g., tool_use("Read", "library/build.gradle")
-          tool_use("Bash", "./gradlew assembleDebug")
-          tool_use("Denoise", "47 lines → 12 lines")
-    """
-    detail_text = f"  {C.GREY}{detail}{C.RST}" if detail else ""
-    print(f"  {C.CYAN}⬡{C.RST} {C.CYAN}{tool_name}{C.RST}{detail_text}")
+    """Show a tool being invoked."""
+    detail_text = f"  [dim]{detail}[/dim]" if detail else ""
+    console.print(f"  [cyan]⬡[/cyan] [bold cyan]{tool_name}[/bold cyan]{detail_text}")
 
 
 def tool_result(tool_name: str, status: str = "success", detail: str = ""):
     """Show the result of a tool call."""
     if status == "success":
-        icon = f"{C.GREEN}✓{C.RST}"
+        icon = "[green]✓[/green]"
     elif status == "error":
-        icon = f"{C.RED}✗{C.RST}"
+        icon = "[red]✗[/red]"
     else:
-        icon = f"{C.YELLOW}!{C.RST}"
-    detail_text = f"  {C.DKGREY}{detail}{C.RST}" if detail else ""
-    print(f"  {icon} {C.GREY}{tool_name}{C.RST}{detail_text}")
+        icon = "[yellow]![/yellow]"
+    detail_text = f"  [dim]{detail}[/dim]" if detail else ""
+    console.print(f"  {icon} [dim]{tool_name}[/dim]{detail_text}")
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-#  Continuous Work Flow — shows the agent actively working
+#  Continuous Work Flow
 # ═══════════════════════════════════════════════════════════════════════════
 
 def work_start(label: str = ""):
     """Visual separator indicating the agent is starting a work block."""
-    suffix = f"  {C.DKGREY}{label}{C.RST}" if label else ""
-    print(f"\n  {C.DKGREY}┌{'─' * 50}{C.RST}{suffix}")
+    suffix = f"  [dim]{label}[/dim]" if label else ""
+    console.print(f"\n  [dim]┌{'─' * 50}[/dim]{suffix}")
 
 
 def work_step(description: str):
     """A single step within a work block."""
-    print(f"  {C.DKGREY}│{C.RST} {description}")
+    console.print(f"  [dim]│[/dim] {description}")
 
 
 def work_end():
     """Close a work block."""
-    print(f"  {C.DKGREY}└{'─' * 50}{C.RST}\n")
+    console.print(f"  [dim]└{'─' * 50}[/dim]\n")
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-#  Cost / Token display (like Claude Code's cost tracker)
+#  Session Stats
 # ═══════════════════════════════════════════════════════════════════════════
 
 def session_stats(steps: int, turns: int, duration_sec: float = 0):
-    """Show session statistics at the end, Claude Code style."""
-    parts = [f"{C.DKGREY}steps: {steps}{C.RST}"]
-    parts.append(f"{C.DKGREY}turns: {turns}{C.RST}")
+    """Show session statistics."""
+    parts = [f"steps: {steps}", f"turns: {turns}"]
     if duration_sec > 0:
         mins = int(duration_sec // 60)
         secs = int(duration_sec % 60)
-        parts.append(f"{C.DKGREY}time: {mins}m {secs}s{C.RST}")
-    print(f"  {' · '.join(parts)}")
-    print()
+        parts.append(f"time: {mins}m {secs}s")
+    console.print(f"  [dim]{' · '.join(parts)}[/dim]")
+    console.print()
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-#  Compact log line display
+#  Compact Log Lines
 # ═══════════════════════════════════════════════════════════════════════════
 
 def log_lines(raw_lines: str, max_lines: int = 8, label: str = ""):
     """Show a compact preview of log output."""
     lines = raw_lines.strip().split("\n")
-    header = f"  {C.DKGREY}output" + (f" ({label})" if label else "") + f":{C.RST}"
-    print(header)
-    shown = lines[:max_lines]
-    for line in shown:
+    header = f"  [dim]output" + (f" ({label})" if label else "") + ":[/dim]"
+    console.print(header)
+    for line in lines[:max_lines]:
         display = line[:90] + "..." if len(line) > 90 else line
-        print(f"  {C.DKGREY}  {display}{C.RST}")
+        console.print(f"  [dim]  {display}[/dim]")
     if len(lines) > max_lines:
-        print(f"  {C.DKGREY}  ... +{len(lines) - max_lines} more lines{C.RST}")
+        console.print(f"  [dim]  ... +{len(lines) - max_lines} more lines[/dim]")
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-#  Final report display (replaces plain text summaries)
+#  Final Report Display
 # ═══════════════════════════════════════════════════════════════════════════
 
 def report_success(pr_link: str, root_cause: str, fix: str, files: list[dict], steps: list):
     """Display a polished success report."""
-    w = min(_term_width(), 72) - 4
-
-    print(f"\n  {C.GREEN}{'━' * w}{C.RST}")
-    print(f"  {C.GREEN}{C.BOLD}  ✅  BUILD FIXED{C.RST}")
-    print(f"  {C.GREEN}{'━' * w}{C.RST}")
-    print()
-    print(f"  {C.GREY}PR{C.RST}          {pr_link}")
-    print(f"  {C.GREY}Root cause{C.RST}  {root_cause}")
-    print(f"  {C.GREY}Fix{C.RST}         {fix}")
-    print()
+    content = Text()
+    content.append("  ✅  BUILD FIXED\n\n", style="bold green")
+    content.append(f"  PR          ", style="dim")
+    content.append(f"{pr_link}\n")
+    content.append(f"  Root cause  ", style="dim")
+    content.append(f"{root_cause}\n")
+    content.append(f"  Fix         ", style="dim")
+    content.append(f"{fix}\n")
 
     if files:
-        print(f"  {C.GREY}Files changed:{C.RST}")
+        content.append(f"\n  Files changed:\n", style="dim")
         for fc in files:
-            print(f"    {C.GREEN}•{C.RST} {C.WHITE}{fc['file']}{C.RST}")
-            print(f"      {C.DKGREY}{fc['change']}{C.RST}")
-        print()
+            content.append(f"    • ", style="green")
+            content.append(f"{fc['file']}\n", style="bold white")
+            content.append(f"      {fc['change']}\n", style="dim")
 
     if steps:
-        print(f"  {C.GREY}Steps:{C.RST}")
-        for i, step in enumerate(steps, 1):
+        content.append(f"\n  Steps:\n", style="dim")
+        for step in steps:
             desc = step.description if hasattr(step, 'description') else str(step)
             result = step.result if hasattr(step, 'result') else ""
-            icon = f"{C.GREEN}✓{C.RST}" if result == "success" else f"{C.RED}✗{C.RST}" if result == "failed" else f"{C.DKGREY}→{C.RST}"
-            print(f"    {icon} {desc}")
-        print()
+            if result == "success":
+                content.append(f"    ✓ ", style="green")
+            elif result == "failed":
+                content.append(f"    ✗ ", style="red")
+            else:
+                content.append(f"    → ", style="dim")
+            content.append(f"{desc}\n")
 
-    print(f"  {C.GREEN}{'━' * w}{C.RST}")
+    console.print()
+    console.print(Panel(content, border_style="green", padding=(1, 1), expand=True))
 
 
-def report_failure(pr_link: str, verdict: str, root_cause: str, why: str, steps: list, hist_errors: list, live_errors: list):
+def report_failure(pr_link: str, verdict: str, root_cause: str, why: str,
+                   steps: list, hist_errors: list, live_errors: list):
     """Display a polished failure report."""
-    w = min(_term_width(), 72) - 4
-
-    print(f"\n  {C.RED}{'━' * w}{C.RST}")
-    print(f"  {C.RED}{C.BOLD}  ❌  {verdict}{C.RST}")
-    print(f"  {C.RED}{'━' * w}{C.RST}")
-    print()
-    print(f"  {C.GREY}PR{C.RST}          {pr_link}")
-    print(f"  {C.GREY}Root cause{C.RST}  {root_cause or 'Could not determine'}")
-    print()
+    content = Text()
+    content.append(f"  ❌  {verdict}\n\n", style="bold red")
+    content.append(f"  PR          ", style="dim")
+    content.append(f"{pr_link}\n")
+    content.append(f"  Root cause  ", style="dim")
+    content.append(f"{root_cause or 'Could not determine'}\n")
 
     if hist_errors:
-        print(f"  {C.GREY}Historical errors:{C.RST}")
+        content.append(f"\n  Historical errors:\n", style="dim")
         for e in hist_errors[:5]:
-            print(f"    {C.DKGREY}•{C.RST} {e}")
-        print()
+            content.append(f"    • {e}\n", style="dim")
 
     if live_errors:
-        print(f"  {C.GREY}Live errors:{C.RST}")
+        content.append(f"\n  Live errors:\n", style="dim")
         for e in live_errors[:5]:
-            print(f"    {C.RED}•{C.RST} {e}")
-        print()
+            content.append(f"    • ", style="red")
+            content.append(f"{e}\n")
 
     if steps:
-        print(f"  {C.GREY}Steps attempted:{C.RST}")
-        for i, step in enumerate(steps, 1):
+        content.append(f"\n  Steps attempted:\n", style="dim")
+        for step in steps:
             desc = step.description if hasattr(step, 'description') else str(step)
             result = step.result if hasattr(step, 'result') else ""
-            icon = f"{C.GREEN}✓{C.RST}" if result == "success" else f"{C.RED}✗{C.RST}" if result == "failed" else f"{C.DKGREY}→{C.RST}"
             cmd = step.command if hasattr(step, 'command') and step.command else ""
-            print(f"    {icon} {desc}")
+            if result == "success":
+                content.append(f"    ✓ ", style="green")
+            elif result == "failed":
+                content.append(f"    ✗ ", style="red")
+            else:
+                content.append(f"    → ", style="dim")
+            content.append(f"{desc}\n")
             if cmd:
-                print(f"      {C.DKGREY}$ {cmd[:70]}{C.RST}")
-        print()
+                content.append(f"      $ {cmd[:70]}\n", style="dim")
 
     if why:
-        print(f"  {C.GREY}Why unfixable:{C.RST}")
-        # Word-wrap
-        words = why.split()
-        line = "    "
-        for word in words:
-            if len(line) + len(word) + 1 > w:
-                print(f"  {line}")
-                line = "    "
-            line += word + " "
-        if line.strip():
-            print(f"  {line}")
-        print()
+        content.append(f"\n  Why unfixable:\n", style="dim")
+        content.append(f"    {why}\n")
 
-    print(f"  {C.RED}{'━' * w}{C.RST}")
+    console.print()
+    console.print(Panel(content, border_style="red", padding=(1, 1), expand=True))
 
 
 def script_generated(script_path: str, script_name: str):
     """Announce the generated fix script."""
-    print()
-    print(f"  {C.GREEN}⬡{C.RST} {C.GREEN}{C.BOLD}Fix script generated{C.RST}")
-    print(f"    {C.WHITE}{script_name}{C.RST}")
-    print(f"    {C.DKGREY}cd /path/to/project && bash {script_name}{C.RST}")
-    print()
+    console.print()
+    console.print(f"  [green]⬡[/green] [bold green]Fix script generated[/bold green]")
+    console.print(f"    [bold white]{script_name}[/bold white]")
+
+    run_cmd = f"cd /path/to/project && bash {script_name}"
+    console.print(f"    [dim]{run_cmd}[/dim]")
+
+    # Auto-copy the run command
+    if _copy_to_clipboard(run_cmd):
+        console.print(f"    [green]✓[/green] [dim]Run command copied to clipboard[/dim]")
+
+    console.print()

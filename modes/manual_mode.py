@@ -23,7 +23,8 @@ from utils.log_analyzer import LogAnalyzer
 from utils.session_report import SessionState, SummaryParser, ReportGenerator
 from utils.display import (
     section, success, error, warning, info, diminfo, agent_msg,
-    user_prompt, command_display, verdict_display, file_edit_preview,
+    user_prompt, command_display, commands_display, verdict_display,
+    file_edit_preview,
     manual_mode_help, step_prompt, progress_spinner, progress_done,
     progress_cancel, interrupted_msg,
     thinking_start, tool_use, tool_result, work_start, work_end,
@@ -33,6 +34,9 @@ from utils.display import (
 
 class ManualMode:
     """Interactive manual mode where user executes commands in a separate terminal."""
+
+    # Max auto-read files per agent response to prevent infinite chains
+    MAX_AUTO_READS_PER_TURN = 5
 
     def __init__(
         self,
@@ -52,6 +56,11 @@ class ManualMode:
         self._step_count = 0
         self._is_running = True
 
+        # Loop detection: track files already read and commands already suggested
+        self._files_read: set[str] = set()
+        self._commands_suggested: list[str] = []
+        self._build_verified: bool = False  # Track if a build has been run and verified
+
         # Session tracking
         self.session = SessionState(
             pr_link=pr_link,
@@ -65,7 +74,13 @@ class ManualMode:
         manual_mode_help()
 
         info(f"Log file: {self.bridge.log_file}")
-        info("Make sure Terminal A outputs are piped to this log file.")
+        print()
+        section("Terminal A Setup")
+        script_cmd = self.bridge.get_script_command()
+        info("Start recording your Terminal A session by running:")
+        command_display(script_cmd, auto_copy=True)
+        info("This captures ALL terminal output automatically — no need to pipe each command.")
+        info(f"To stop recording: {self.bridge.get_stop_script_hint()}")
         print()
 
         # Phase 1: Show historical analysis & start verify-first flow
@@ -160,10 +175,15 @@ declare BUILD_UNFIXABLE_PROJECT_CHANGES_REQUIRED."""
 
         # Parse and display any commands
         actions = ActionParser.parse(response)
+        commands = [a.content for a in actions if a.action_type == ActionType.COMMAND]
+
+        if len(commands) == 1:
+            command_display(commands[0], self.bridge.log_file, auto_copy=True)
+        elif len(commands) > 1:
+            commands_display(commands, self.bridge.log_file)
+
         for action in actions:
-            if action.action_type == ActionType.COMMAND:
-                command_display(action.content, self.bridge.log_file)
-            elif action.action_type == ActionType.VERDICT:
+            if action.action_type == ActionType.VERDICT:
                 self._handle_verdict(action.content, action.metadata.get("reason", ""), response)
                 return
 
@@ -237,6 +257,10 @@ If you've reached a conclusion that this is unfixable, provide the SUMMARY block
 
         agent_msg(response)
 
+        # Track build verification
+        if any(kw in denoised.lower() for kw in ["build failed", "build successful", "build_failed", "build success"]):
+            self._build_verified = True
+
         # Track step
         self.session.add_step(
             f"Scanned Terminal A logs (step {self._step_count})",
@@ -305,7 +329,13 @@ If you've reached a conclusion that this is unfixable, provide the SUMMARY block
         self._handle_agent_response(response)
 
     def _handle_agent_response(self, response: str):
-        """Process the agent's response for any actionable items."""
+        """
+        Process the agent's response for actionable items.
+
+        CRITICAL: This method NEVER recurses. After processing file reads
+        and getting a new agent response, it displays the result and STOPS.
+        Control always returns to the user after this method completes.
+        """
         # Check for summary block
         agent_summary = SummaryParser.parse(response)
         if agent_summary:
@@ -313,31 +343,152 @@ If you've reached a conclusion that this is unfixable, provide the SUMMARY block
 
         actions = ActionParser.parse(response)
 
+        # ── Check for verdict first (terminal) ──
         for action in actions:
-            if action.action_type == ActionType.COMMAND:
-                command_display(action.content, self.bridge.log_file)
-
-            elif action.action_type == ActionType.READ_FILE:
-                info(f"Agent requested file: {action.content}")
-                self._auto_read_file(action.content)
-
-            elif action.action_type == ActionType.EDIT_FILE:
-                self._confirm_edit(action.content, action.metadata.get("new_content", ""))
-
-            elif action.action_type == ActionType.VERDICT:
+            if action.action_type == ActionType.VERDICT:
                 self._handle_verdict(
                     action.content,
                     action.metadata.get("reason", ""),
                     response,
                 )
+                return
+
+        # ── Collect and batch all file read requests ──
+        file_reads = []
+        for action in actions:
+            if action.action_type == ActionType.READ_FILE:
+                filepath = action.content
+                # Loop detection: skip files we've already read
+                if filepath in self._files_read:
+                    diminfo(f"Skipping already-read file: {filepath}")
+                    continue
+                file_reads.append(filepath)
+
+        # ── Read requested files in batch (no recursion!) ──
+        if file_reads:
+            # Cap to prevent runaway reads
+            if len(file_reads) > self.MAX_AUTO_READS_PER_TURN:
+                warning(f"Agent requested {len(file_reads)} files — capping at {self.MAX_AUTO_READS_PER_TURN}")
+                file_reads = file_reads[:self.MAX_AUTO_READS_PER_TURN]
+
+            file_contents = self._batch_read_files(file_reads)
+
+            # Feed all file contents to agent in ONE message
+            if file_contents:
+                thinking_start("analyzing file contents")
+                progress_spinner("Agent analyzing files")
+                combined = "\n\n".join(file_contents)
+                new_response = self.gemini.chat_main(
+                    f"Here are the requested file contents:\n\n{combined}\n\n"
+                    "Continue your analysis. Suggest the next command for me to run, "
+                    "or provide a VERDICT if you have enough information."
+                )
+                progress_done()
+                agent_msg(new_response)
+
+                # Check the NEW response for summary/verdict/commands — but DO NOT recurse
+                new_summary = SummaryParser.parse(new_response)
+                if new_summary:
+                    SummaryParser.merge_with_session(new_summary, self.session)
+
+                new_actions = ActionParser.parse(new_response)
+
+                for action in new_actions:
+                    if action.action_type == ActionType.VERDICT:
+                        self._handle_verdict(
+                            action.content,
+                            action.metadata.get("reason", ""),
+                            new_response,
+                        )
+                        return
+
+                # Display commands from the NEW response
+                new_commands = [a.content for a in new_actions if a.action_type == ActionType.COMMAND]
+                self._display_commands(new_commands)
+
+                # Display any edit requests from the new response
+                for action in new_actions:
+                    if action.action_type == ActionType.EDIT_FILE:
+                        self._confirm_edit(action.content, action.metadata.get("new_content", ""))
+
+                # If agent wants MORE files, just tell the user
+                more_files = [a.content for a in new_actions if a.action_type == ActionType.READ_FILE]
+                if more_files:
+                    for f in more_files:
+                        if f not in self._files_read:
+                            info(f"Agent also wants: {f} (will read on next turn — press Enter)")
+
+                # STOP HERE — return control to user
+                self._trim_if_needed()
+                return
+
+        # ── Display commands from original response ──
+        commands = [a.content for a in actions if a.action_type == ActionType.COMMAND]
+        self._display_commands(commands)
+
+        # ── Handle edit requests ──
+        for action in actions:
+            if action.action_type == ActionType.EDIT_FILE:
+                self._confirm_edit(action.content, action.metadata.get("new_content", ""))
 
         # Trim history if it's getting long
+        self._trim_if_needed()
+
+    def _display_commands(self, commands: list[str]):
+        """Display commands with smart copy behavior. Track for loop detection."""
+        if not commands:
+            return
+
+        # Loop detection: check if we're suggesting the same commands again
+        for cmd in commands:
+            if cmd in self._commands_suggested[-5:]:
+                warning(f"Agent is re-suggesting a previous command: {cmd[:60]}...")
+
+        self._commands_suggested.extend(commands)
+
+        if len(commands) == 1:
+            command_display(commands[0], self.bridge.log_file, auto_copy=True)
+        else:
+            commands_display(commands, self.bridge.log_file)
+
+    def _batch_read_files(self, filepaths: list[str]) -> list[str]:
+        """Read multiple files and return formatted content strings."""
+        results = []
+        for filepath in filepaths:
+            tool_use("Read", filepath)
+            content = self.bridge.read_project_file(filepath)
+            if content.startswith("[Error"):
+                tool_result("Read", "error", content)
+                results.append(f"File: {filepath}\n[Error: Could not read file]")
+            else:
+                tool_result("Read", "success", f"{len(content.splitlines())} lines")
+                results.append(f"File: {filepath}\n```\n{content}\n```")
+
+            # Track that we've read this file
+            self._files_read.add(filepath)
+            self.session.add_step(
+                f"Read file: {filepath}",
+                result="success" if not content.startswith("[Error") else "failed",
+                output_summary=f"{len(content.splitlines())} lines read" if not content.startswith("[Error") else "error",
+            )
+        return results
+
+    def _trim_if_needed(self):
+        """Trim conversation history if it's getting long."""
         if self.gemini.get_history_length() > 20:
             self.gemini.trim_history(keep_last_n=14)
             info("(Trimmed conversation history to save context window)")
 
     def _handle_verdict(self, verdict: str, reason: str, full_response: str):
         """Handle a verdict from the agent — display and finalize session."""
+        # Build verification guard: don't accept BUILD_FIXED without actual build verification
+        if verdict == "BUILD_FIXED" and not self._build_verified:
+            warning("Agent declared BUILD_FIXED but no build output has been verified!")
+            info("Please run the build command first and press Enter to scan the logs.")
+            info("The agent's verdict will be recorded once the build is actually verified.")
+            # Don't finalize — let the user continue
+            return
+
         verdict_display(verdict, reason)
         self.session.finalize(verdict, reason)
 
@@ -348,34 +499,12 @@ If you've reached a conclusion that this is unfixable, provide the SUMMARY block
 
         self._is_running = False
 
-    def _auto_read_file(self, filepath: str):
-        """Automatically read a file and feed it to the agent."""
-        tool_use("Read", filepath)
-        content = self.bridge.read_project_file(filepath)
-        if content.startswith("[Error"):
-            tool_result("Read", "error", content)
-            self.gemini.chat_main(f"Could not read file {filepath}: {content}")
-        else:
-            tool_result("Read", "success", f"{len(content.splitlines())} lines")
-            thinking_start("analyzing file contents")
-            progress_spinner("Agent analyzing file")
-            response = self.gemini.chat_main(
-                f"Here is the content of {filepath}:\n```\n{content}\n```\n"
-                "Continue your analysis."
-            )
-            progress_done()
-            agent_msg(response)
-
-            self.session.add_step(
-                f"Read file: {filepath}",
-                result="success",
-                output_summary=f"{len(content.splitlines())} lines read",
-            )
-
-            self._handle_agent_response(response)
-
     def _confirm_edit(self, filepath: str, new_content: str):
-        """Ask user to confirm a build file edit."""
+        """
+        Ask user to confirm a build file edit.
+        After confirming/declining, notifies the agent but does NOT process
+        the agent's response — control returns to the user.
+        """
         tool_use("Edit", filepath)
         file_edit_preview(filepath, new_content)
         confirm = user_prompt("Apply this edit? (yes/no): ").strip().lower()
@@ -392,15 +521,25 @@ If you've reached a conclusion that this is unfixable, provide the SUMMARY block
                     f"Edited build file: {filepath}",
                     result="success",
                 )
-                self.gemini.chat_main(f"Edit applied successfully to {filepath}. What's next?")
+                # Notify agent but DON'T process response — user gets control
+                progress_spinner("Notifying agent of edit")
+                response = self.gemini.chat_main(
+                    f"Edit applied successfully to {filepath}. "
+                    "Now suggest running the build to verify the fix."
+                )
+                progress_done()
+                agent_msg(response)
+                # Display any commands from the response
+                actions = ActionParser.parse(response)
+                commands = [a.content for a in actions if a.action_type == ActionType.COMMAND]
+                self._display_commands(commands)
             else:
                 error(f"Failed to write: {filepath}")
                 self.session.add_step(f"Failed to edit: {filepath}", result="failed")
-                self.gemini.chat_main(f"Failed to write to {filepath}. File may not be a build file.")
+                info("The file may not be a build configuration file.")
         else:
             info("Edit skipped by user.")
             self.session.add_step(f"Edit declined by user: {filepath}", result="skipped")
-            self.gemini.chat_main(f"User declined the edit to {filepath}. Suggest alternatives.")
 
     # ── Final Reporting ─────────────────────────────────────────────────
 

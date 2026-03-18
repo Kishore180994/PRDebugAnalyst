@@ -60,15 +60,16 @@ class ActionParser:
 
         # Check for file read requests
         for match in cls.READ_FILE_PATTERN.finditer(response):
-            filepath = match.group(1).strip()
-            actions.append(AgentAction(
-                action_type=ActionType.READ_FILE,
-                content=filepath,
-            ))
+            filepath = cls._clean_filepath(match.group(1).strip())
+            if filepath:  # skip empty paths after cleaning
+                actions.append(AgentAction(
+                    action_type=ActionType.READ_FILE,
+                    content=filepath,
+                ))
 
         # Check for file edit requests
         for match in cls.EDIT_FILE_PATTERN.finditer(response):
-            filepath = match.group(1).strip()
+            filepath = cls._clean_filepath(match.group(1).strip())
             content = match.group(2).strip()
             actions.append(AgentAction(
                 action_type=ActionType.EDIT_FILE,
@@ -94,6 +95,36 @@ class ActionParser:
             ))
 
         return actions
+
+    @classmethod
+    def _clean_filepath(cls, raw_path: str) -> str:
+        """
+        Clean a filepath extracted from agent response.
+        Strips backticks, trailing descriptions in parentheses, and other junk.
+
+        Examples:
+            "`gradle/wrapper/gradle-wrapper.properties`" → "gradle/wrapper/gradle-wrapper.properties"
+            "app/build.gradle.kts (to check dependencies)" → "app/build.gradle.kts"
+            "`build.gradle` — the root build file" → "build.gradle"
+        """
+        path = raw_path
+
+        # Remove trailing parenthetical descriptions: "path (description)" or "`path` (desc)"
+        path = re.sub(r'\s*\(.*$', '', path)
+
+        # Remove trailing em-dash or hyphen descriptions: "path — description" or "path - description"
+        path = re.sub(r'\s*[—–\-]\s+\S.*$', '', path)
+
+        # Remove trailing comments: "path # comment"
+        path = re.sub(r'\s*#\s+.*$', '', path)
+
+        # Remove backticks (after stripping descriptions so "`path` (desc)" works)
+        path = path.strip("`")
+
+        # Remove any remaining leading/trailing whitespace and quotes
+        path = path.strip().strip("'\"")
+
+        return path
 
     @classmethod
     def has_verdict(cls, response: str) -> bool:

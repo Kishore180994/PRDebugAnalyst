@@ -146,9 +146,8 @@ def setup_project(pr_link: str) -> str:
 
 def get_log_file_path() -> str:
     """Prompt for the Terminal A log file path (manual mode)."""
-    info("In manual mode, Terminal A output should be piped to a log file.")
-    info("You can use: (your_command) 2>&1 | tee -a /path/to/logfile")
-    info("Press Enter to use the default temp file location.")
+    info("In manual mode, we use the `script` command to record Terminal A output.")
+    info("Press Enter to use the default log file location, or enter a custom path.")
 
     log_path = user_prompt("Log file path (or Enter for default): ").strip()
     if log_path:
@@ -272,7 +271,6 @@ def main():
         bridge = TerminalBridge(project_path, log_file if log_file else None)
 
         info(f"Terminal A log file: {bridge.log_file}")
-        info("Tip: In Terminal A, append '2>&1 | tee -a <log_file>' to your commands")
 
         manual = ManualMode(gemini, bridge, log_analyzer, pr_link, historical_context, output_dir)
         session = manual.run()

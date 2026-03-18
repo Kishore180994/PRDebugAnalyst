@@ -55,6 +55,9 @@ class AutoMode:
         self.output_dir = output_dir
         self._iteration = 0
         self._verdict: Optional[tuple[str, str]] = None
+        self._build_executed: bool = False  # Track if a build command has been run
+        self._files_read: set[str] = set()  # Loop detection: files already read
+        self._commands_executed: list[str] = []  # Loop detection: commands already run
 
         # Session tracking
         self.session = SessionState(
@@ -251,7 +254,8 @@ Start now: summarize historical failures, then suggest the verification build co
                 self._read_and_report(action.content)
 
             elif action.action_type == ActionType.EDIT_FILE:
-                self._edit_and_report(action.content, action.metadata.get("new_content", ""))
+                filepath = action.content
+                self._edit_and_report(filepath, action.metadata.get("new_content", ""))
 
             elif action.action_type == ActionType.MESSAGE:
                 self._prompt_next_action()
@@ -264,6 +268,15 @@ Start now: summarize historical failures, then suggest the verification build co
 
     def _execute_and_report(self, command: str):
         """Execute a command and report results to the agent."""
+        # Loop detection: warn if re-running the same command
+        if command in self._commands_executed[-5:]:
+            warning(f"Re-running a recent command: {command[:60]}...")
+        self._commands_executed.append(command)
+
+        # Track build execution
+        if any(kw in command.lower() for kw in ["assembledebug", "gradlew", "gradle", "build"]):
+            self._build_executed = True
+
         tool_use("Bash", command)
         progress_spinner("Running command")
 
@@ -317,6 +330,17 @@ Start now: summarize historical failures, then suggest the verification build co
 
     def _read_and_report(self, filepath: str):
         """Read a file and report its contents to the agent."""
+        # Loop detection: skip files already read
+        if filepath in self._files_read:
+            diminfo(f"Skipping already-read file: {filepath}")
+            # Just remind the agent it already has this file
+            self.gemini.chat_main(
+                f"You already read {filepath} earlier in this session. "
+                "Please use the content from before. What's the next step?"
+            )
+            return
+        self._files_read.add(filepath)
+
         tool_use("Read", filepath)
         content = self.bridge.read_project_file(filepath)
 
@@ -408,6 +432,16 @@ Start now: summarize historical failures, then suggest the verification build co
 
         result = ActionParser.extract_verdict(response)
         if result:
+            verdict, reason = result
+            # Build verification guard: don't accept BUILD_FIXED without running a build
+            if verdict == "BUILD_FIXED" and not self._build_executed:
+                warning("Agent declared BUILD_FIXED but no build command has been executed!")
+                info("Requesting agent to run the build first...")
+                self.gemini.chat_main(
+                    "You declared BUILD_FIXED but no build command has been run yet. "
+                    "Please run the build command first to verify the fix before declaring a verdict."
+                )
+                return  # Don't set verdict — let the loop continue
             self._verdict = result
 
     def _pause_for_user(self) -> str:
