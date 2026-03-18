@@ -165,8 +165,10 @@ class TerminalBridge:
         """
         Execute a command with real-time output streaming to the log file.
         Used in auto mode for long-running commands like gradle builds.
+        Properly kills the process on timeout and waits for cleanup.
         """
         output_lines = []
+        process = None
         try:
             process = subprocess.Popen(
                 command,
@@ -184,25 +186,47 @@ class TerminalBridge:
                 log_f.write(f"COMMAND: {command}\n")
                 log_f.write(f"{'='*60}\n")
 
-                for line in process.stdout:
-                    output_lines.append(line)
-                    log_f.write(line)
-                    log_f.flush()
+                try:
+                    for line in process.stdout:
+                        output_lines.append(line)
+                        log_f.write(line)
+                        log_f.flush()
 
-            process.wait(timeout=timeout)
+                    process.wait(timeout=timeout)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait()  # Wait for kill to complete, prevent zombies
+                    return -1, "".join(output_lines) + f"\n[Timed out after {timeout}s]"
+
             return process.returncode, "".join(output_lines)
 
-        except subprocess.TimeoutExpired:
-            process.kill()
-            return -1, "".join(output_lines) + f"\n[Timed out after {timeout}s]"
         except Exception as e:
+            if process and process.poll() is None:
+                process.kill()
+                process.wait()
             return -1, f"[Execution error]: {e}"
 
     # ── File Operations (for auto mode) ─────────────────────────────────
 
-    def read_project_file(self, relative_path: str) -> str:
-        """Read a file from the project directory."""
+    def _validate_project_path(self, relative_path: str) -> tuple[bool, str]:
+        """
+        Validate that a relative path stays within the project directory.
+        Returns (is_valid, resolved_full_path).
+        Prevents path traversal attacks (e.g., ../../etc/passwd).
+        """
         full_path = os.path.join(self.project_path, relative_path)
+        canonical_project = os.path.realpath(self.project_path)
+        canonical_full = os.path.realpath(full_path)
+
+        if not canonical_full.startswith(canonical_project + os.sep) and canonical_full != canonical_project:
+            return False, full_path
+        return True, full_path
+
+    def read_project_file(self, relative_path: str) -> str:
+        """Read a file from the project directory. Validates path stays within project."""
+        is_valid, full_path = self._validate_project_path(relative_path)
+        if not is_valid:
+            return f"[Error reading {relative_path}: Access denied — path escapes project directory]"
         try:
             with open(full_path, "r", errors="replace") as f:
                 return f.read()
@@ -211,7 +235,11 @@ class TerminalBridge:
 
     def write_project_file(self, relative_path: str, content: str) -> bool:
         """Write content to a file in the project directory. Only for build files!"""
-        full_path = os.path.join(self.project_path, relative_path)
+        # Validate path doesn't escape project directory
+        is_valid, full_path = self._validate_project_path(relative_path)
+        if not is_valid:
+            print(f"  ⛔ BLOCKED: Path escapes project directory: {relative_path}")
+            return False
 
         # Safety: only allow writing to build-related files
         allowed_extensions = (

@@ -23,7 +23,7 @@ from utils.git_ops import parse_pr_link, setup_project_from_pr
 from utils.display import (
     banner, section, success, error, warning, info,
     user_prompt, log_summary_table, verdict_display,
-    progress_cancel, interrupted_msg,
+    progress_cancel, interrupted_msg, script_setup_display,
 )
 from modes.manual_mode import ManualMode
 from modes.auto_mode import AutoMode
@@ -227,6 +227,12 @@ def analyze_historical_logs(log_analyzer: LogAnalyzer, pr_link: str, gemini: Gem
 
 def main():
     """Main entry point for PR Debug Analyst."""
+    import argparse
+    parser = argparse.ArgumentParser(description="PR Debug Analyst — AI-powered Android build debugger")
+    parser.add_argument("--web", action="store_true", help="Launch live web dashboard alongside the terminal UI")
+    parser.add_argument("--port", type=int, default=5000, help="Port for web dashboard (default: 5000)")
+    args = parser.parse_args()
+
     banner()
 
     # ── Setup ───────────────────────────────────────────────────────────
@@ -266,11 +272,48 @@ def main():
     # Both modes now return a SessionState and handle their own final reports
     # (summary display, .sh script generation, JSON report saving)
 
+    # ── Optional Web Dashboard ──
+    web_url = None
+    if args.web:
+        try:
+            from web.server import start_server
+            web_url = start_server(
+                port=args.port,
+                log_file="",  # Will be set below for manual mode
+                pr_link=pr_link,
+                mode=mode,
+            )
+            success(f"Web dashboard: {web_url}")
+            info("Open in your browser for the live two-panel view")
+        except ImportError as e:
+            warning(f"Could not start web dashboard: {e}")
+            info("Install with: pip install flask flask-socketio --break-system-packages")
+        except Exception as e:
+            warning(f"Web dashboard failed to start: {e}")
+
     if mode == "manual":
         log_file = get_log_file_path()
         bridge = TerminalBridge(project_path, log_file if log_file else None)
 
-        info(f"Terminal A log file: {bridge.log_file}")
+        # Clear any stale log content and reset position
+        bridge.clear_log_file()
+
+        # Update web server with the log file path
+        if args.web and web_url:
+            try:
+                from web import server as web_server
+                web_server._log_file = bridge.log_file
+            except Exception:
+                pass
+
+        # Show the script command prominently BEFORE anything else
+        script_cmd = bridge.get_script_command()
+        script_setup_display(script_cmd, bridge.log_file)
+        user_prompt("Press Enter once you've started `script` in Terminal A...")
+        success("Terminal A recording active — starting agent")
+
+        # Reset read position to skip the script startup message
+        bridge.reset_log_position()
 
         manual = ManualMode(gemini, bridge, log_analyzer, pr_link, historical_context, output_dir)
         session = manual.run()
@@ -280,6 +323,14 @@ def main():
 
         auto = AutoMode(gemini, bridge, log_analyzer, pr_link, historical_context, output_dir)
         session = auto.run()
+
+    # Stop web server if running
+    if args.web:
+        try:
+            from web.server import stop_server
+            stop_server()
+        except Exception:
+            pass
 
     section("Done")
     info("Thank you for using PR Debug Analyst!")

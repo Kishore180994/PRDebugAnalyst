@@ -52,8 +52,10 @@ class Config:
         """
         Create config from environment variables with sensible defaults.
         Priority: environment variable > hardcoded default in this class.
-        If you set gemini_api_key directly in this file, it will be used
-        as long as GEMINI_API_KEY env var is not set.
+
+        SECURITY: Always use the GEMINI_API_KEY environment variable.
+        Never hardcode API keys in source files to avoid accidental
+        exposure in version control.
         """
         instance = cls()
         # Only override from env if the env var is actually set

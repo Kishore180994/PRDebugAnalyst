@@ -8,6 +8,7 @@ Features:
   - Dashboard-style panels for commands, edits, verdicts
   - Auto-copy to clipboard for single commands
   - Copyable plain-text command blocks (no box-drawing interference)
+  - Web event emission for live web dashboard
 """
 import os
 import sys
@@ -32,6 +33,8 @@ from rich import box
 
 import threading
 import time
+
+from utils.web_events import emitter, EventType
 
 # ═══════════════════════════════════════════════════════════════════════════
 #  Theme & Console
@@ -166,14 +169,17 @@ def progress_spinner(msg: str):
         _active_spinner.stop()
     _active_spinner = _Spinner(msg)
     _active_spinner.start()
+    emitter.emit(EventType.SPINNER_START, message=msg)
 
 
 def progress_done(label: str = "done"):
     """Stop the active spinner with a success checkmark."""
     global _active_spinner
     if _active_spinner:
-        _active_spinner.stop(f"  [green]✓[/green] [dim]{_active_spinner.message}[/dim] [dim]— {label}[/dim]")
+        msg = _active_spinner.message
+        _active_spinner.stop(f"  [green]✓[/green] [dim]{msg}[/dim] [dim]— {label}[/dim]")
         _active_spinner = None
+        emitter.emit(EventType.SPINNER_DONE, message=msg, label=label)
 
 
 def progress_cancel():
@@ -241,6 +247,7 @@ def section(title: str):
         expand=False,
     ))
     console.print()
+    emitter.emit(EventType.SECTION, title=title)
 
 
 def subsection(title: str):
@@ -254,15 +261,19 @@ def subsection(title: str):
 
 def success(msg: str):
     console.print(f"  [green]✓[/green] {msg}")
+    emitter.emit(EventType.SUCCESS, message=msg)
 
 def error(msg: str):
     console.print(f"  [red]✗[/red] {msg}")
+    emitter.emit(EventType.ERROR, message=msg)
 
 def warning(msg: str):
     console.print(f"  [yellow]![/yellow] [yellow]{msg}[/yellow]")
+    emitter.emit(EventType.WARNING, message=msg)
 
 def info(msg: str):
     console.print(f"  [dim]│[/dim] {msg}")
+    emitter.emit(EventType.INFO, message=msg)
 
 def diminfo(msg: str):
     """Even more subtle info line."""
@@ -291,6 +302,7 @@ def agent_msg(msg: str):
         )
     )
     console.print()
+    emitter.emit(EventType.AGENT_MESSAGE, content=msg)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -305,6 +317,48 @@ def user_prompt(prompt_text: str = "") -> str:
         return input("  \033[1;34m❯\033[0m ")
     except EOFError:
         return "quit"
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  Script Setup — Prominent Terminal A recording setup
+# ═══════════════════════════════════════════════════════════════════════════
+
+def script_setup_display(script_cmd: str, log_file: str):
+    """
+    Display a prominent setup panel telling the user to paste the script
+    command into Terminal A. This is the FIRST thing the user should do
+    before any agent interaction begins.
+    """
+    console.print()
+
+    # Build the content
+    content = Text()
+    content.append("Paste this command in Terminal A to start recording:\n\n", style="dim")
+    content.append(f"  {script_cmd}\n\n", style="bold white")
+    content.append("This records all terminal output automatically.\n", style="dim")
+    content.append(f"Log file: {log_file}\n", style="dim cyan")
+    content.append("To stop recording later: type ", style="dim")
+    content.append("exit", style="bold yellow")
+    content.append(" or press ", style="dim")
+    content.append("Ctrl+D", style="bold yellow")
+
+    console.print(Panel(
+        content,
+        title="[bold yellow]⚡ TERMINAL A SETUP — DO THIS FIRST[/bold yellow]",
+        title_align="center",
+        border_style="yellow",
+        padding=(1, 2),
+        expand=True,
+        box=box.DOUBLE,
+    ))
+
+    # Auto-copy to clipboard
+    if _copy_to_clipboard(script_cmd):
+        console.print(f"  [green]✓[/green] [dim]Command copied to clipboard — paste it in Terminal A[/dim]")
+    else:
+        console.print(f"  [dim]ℹ Copy the command above and paste it in Terminal A[/dim]")
+
+    console.print()
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -345,6 +399,7 @@ def command_display(command: str, auto_copy: bool = True):
 
     console.print(f"  [dim]Then press Enter here to scan the output[/dim]")
     console.print()
+    emitter.emit(EventType.COMMAND, command=command, auto_copy=auto_copy)
 
 
 def commands_display(commands: list[str]):
@@ -374,6 +429,7 @@ def commands_display(commands: list[str]):
     console.print(f"  [dim]ℹ Select a command line to copy it[/dim]")
     console.print(f"  [dim]Then press Enter here to scan the output[/dim]")
     console.print()
+    emitter.emit(EventType.COMMANDS, commands=commands)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -403,6 +459,7 @@ def verdict_display(verdict: str, reason: str):
         box=border_box,
     ))
     console.print()
+    emitter.emit(EventType.VERDICT, verdict=verdict, reason=reason)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -497,6 +554,7 @@ def step_prompt(step_num: int):
     step_text.append(" ━━━━━━━━━━━━━━━━━━━━━━━━━", style="dim cyan")
     console.print(step_text)
     console.print(f"  [dim]enter · done · fail · quit · or type[/dim]")
+    emitter.emit(EventType.STEP, step_num=step_num)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -553,6 +611,7 @@ def thinking_start(topic: str = ""):
     """Show the start of a thinking/reasoning block."""
     label = f" {topic}" if topic else ""
     console.print(f"\n  [dim italic]▸ thinking{label}...[/dim italic]")
+    emitter.emit(EventType.THINKING_START, topic=topic)
 
 
 def thinking_end():
@@ -582,6 +641,7 @@ def tool_use(tool_name: str, detail: str = ""):
     badge.append(f"[{tool_name}]", style="bold cyan on grey11")
     detail_text = f"  [dim]{detail}[/dim]" if detail else ""
     console.print(f"  {badge}{detail_text}")
+    emitter.emit(EventType.TOOL_USE, name=tool_name, detail=detail)
 
 
 def tool_result(tool_name: str, status: str = "success", detail: str = ""):
@@ -600,6 +660,7 @@ def tool_result(tool_name: str, status: str = "success", detail: str = ""):
     badge.append(f"[{tool_name}]", style=f"bold {style} on grey11")
     detail_text = f"  [dim]{detail}[/dim]" if detail else ""
     console.print(f"  [{style}]{icon}[/{style}] {badge}{detail_text}")
+    emitter.emit(EventType.TOOL_RESULT, name=tool_name, status=status, detail=detail)
 
 
 # ═══════════════════════════════════════════════════════════════════════════

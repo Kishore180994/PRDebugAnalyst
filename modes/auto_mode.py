@@ -35,7 +35,8 @@ from utils.display import (
 class AutoMode:
     """Autonomous mode where the agent drives the entire debugging process."""
 
-    MAX_ITERATIONS = 25         # Safety limit on total iterations
+    SOFT_LIMIT = 25             # Warn after this many iterations
+    HARD_LIMIT = 100            # Absolute safety cap (prevent infinite loops)
     MAX_COMMANDS_PER_STEP = 3   # Max commands from a single agent response
     COMMAND_TIMEOUT = 600       # 10 min timeout per command
 
@@ -77,7 +78,7 @@ class AutoMode:
         """
         section("Auto Mode Started")
         info(f"Project: {self.bridge.project_path}")
-        info(f"Max iterations: {self.MAX_ITERATIONS}")
+        info(f"Runs until definitive verdict (soft warning at {self.SOFT_LIMIT} iterations)")
         print()
 
         # Phase 0: Show historical failures to user
@@ -93,10 +94,15 @@ class AutoMode:
 
         # Phase 2: Iterative debugging loop
         work_start("Autonomous debugging")
-        while self._verdict is None and self._iteration < self.MAX_ITERATIONS:
+        while self._verdict is None and self._iteration < self.HARD_LIMIT:
             self._iteration += 1
             diminfo(f"{'─' * 40}")
-            diminfo(f"Iteration {self._iteration}/{self.MAX_ITERATIONS}")
+            diminfo(f"Iteration {self._iteration}")
+
+            # Soft limit: warn but keep going
+            if self._iteration == self.SOFT_LIMIT:
+                warning(f"Reached {self.SOFT_LIMIT} iterations — still working toward a verdict...")
+                info("The agent will continue until it reaches BUILD_FIXED or BUILD_UNFIXABLE.")
 
             try:
                 self._step()
@@ -151,12 +157,28 @@ class AutoMode:
 
         work_end()
 
-        # Max iterations reached without verdict
+        # Hard limit reached without verdict — force a final attempt
         if self._verdict is None:
-            self._verdict = (
-                "NEEDS_MORE_INVESTIGATION",
-                f"Reached maximum iterations ({self.MAX_ITERATIONS}) without resolution."
-            )
+            warning(f"Reached hard limit ({self.HARD_LIMIT} iterations) — requesting final verdict from agent")
+            try:
+                response = self.gemini.chat_main(
+                    f"You have been working for {self.HARD_LIMIT} iterations without reaching a verdict. "
+                    "You MUST now provide your final SUMMARY block and a definitive VERDICT. "
+                    "If the build is passing, use BUILD_FIXED. "
+                    "If it requires source code changes, use BUILD_UNFIXABLE_PROJECT_CHANGES_REQUIRED. "
+                    "If you cannot determine the issue, use BUILD_UNFIXABLE_UNKNOWN. "
+                    "Provide the SUMMARY block now."
+                )
+                agent_msg(response)
+                self._check_verdict(response)
+            except Exception:
+                pass
+
+            if self._verdict is None:
+                self._verdict = (
+                    "BUILD_UNFIXABLE_UNKNOWN",
+                    f"Reached hard limit ({self.HARD_LIMIT} iterations) without definitive resolution."
+                )
 
         # Finalize session
         self.session.finalize(self._verdict[0], self._verdict[1])
@@ -501,6 +523,17 @@ or a final VERDICT with SUMMARY block."""
                     "Please run the build command first to verify the fix before declaring a verdict."
                 )
                 return  # Don't set verdict — let the loop continue
+
+            # Reject NEEDS_MORE_INVESTIGATION — keep running until a definitive verdict
+            if verdict == "NEEDS_MORE_INVESTIGATION" and self._iteration < self.HARD_LIMIT:
+                info("Agent wants more investigation — continuing automatically...")
+                self.gemini.chat_main(
+                    "NEEDS_MORE_INVESTIGATION is not a final verdict. Keep debugging. "
+                    "Try a different approach, read different files, or run different commands. "
+                    "You must reach BUILD_FIXED or BUILD_UNFIXABLE_*."
+                )
+                return  # Don't set verdict — let the loop continue
+
             self._verdict = result
 
     def _pause_for_user(self) -> str:
@@ -538,7 +571,9 @@ or a final VERDICT with SUMMARY block."""
         """Get the last agent (model) response from history."""
         for content in reversed(self.gemini._main_history):
             if content.role == "model" and content.parts:
-                return content.parts[0].text or ""
+                part = content.parts[0]
+                if hasattr(part, 'text') and part.text:
+                    return part.text
         return ""
 
     # ── Final Reporting ─────────────────────────────────────────────────

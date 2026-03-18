@@ -77,16 +77,6 @@ class ManualMode:
         section("Manual Mode Started")
         manual_mode_help()
 
-        info(f"Log file: {self.bridge.log_file}")
-        print()
-        section("Terminal A Setup")
-        script_cmd = self.bridge.get_script_command()
-        info("Start recording your Terminal A session by running:")
-        command_display(script_cmd, auto_copy=True)
-        info("This captures ALL terminal output automatically — no need to pipe each command.")
-        info(f"To stop recording: {self.bridge.get_stop_script_hint()}")
-        print()
-
         # Phase 1: Show historical analysis & start verify-first flow
         try:
             self._initial_analysis()
