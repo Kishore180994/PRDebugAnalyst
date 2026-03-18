@@ -195,10 +195,16 @@ class ReportGenerator:
     """Generates final outputs: summary display, .sh fix script, JSON report."""
 
     @staticmethod
-    def generate_fix_script(session: SessionState, output_dir: str) -> str:
+    def generate_fix_script(session: SessionState, output_dir: str, memory=None) -> str:
         """
         Generate a .sh script that reproduces the fix for this PR.
         Only generated on BUILD_FIXED verdict.
+
+        Args:
+            session: The SessionState with steps and files_changed
+            output_dir: Directory where the script will be saved
+            memory: Optional SessionMemory instance for supplementary command data
+
         Returns the path to the generated script.
         """
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -212,6 +218,7 @@ class ReportGenerator:
         fix_commands = []
         diagnostic_commands = []
 
+        # First pass: use session.steps as primary source
         for step in session.steps:
             if not step.command:
                 continue
@@ -225,6 +232,23 @@ class ReportGenerator:
                 diagnostic_commands.append((step.description, cmd))
             else:
                 fix_commands.append((step.description, cmd))
+
+        # Second pass: supplement with memory data if available
+        if memory and hasattr(memory, 'commands'):
+            for cmd_rec in memory.commands:
+                cmd = cmd_rec.command.strip()
+                # Skip if we already have this command
+                if any(cmd in existing_cmd for _, existing_cmd in fix_commands + diagnostic_commands):
+                    continue
+                is_diagnostic = any(kw in cmd.lower() for kw in [
+                    "gradlew", "gradle", "cat ", "grep ", "find ", "ls ",
+                    "echo ", "pwd", "--version", "--stacktrace",
+                ])
+                desc = f"(from memory) {cmd[:60]}"
+                if is_diagnostic:
+                    diagnostic_commands.append((desc, cmd))
+                else:
+                    fix_commands.append((desc, cmd))
 
         # Also include file changes
         file_edits = []

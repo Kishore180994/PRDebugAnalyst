@@ -21,6 +21,7 @@ from agents.action_parser import ActionParser, ActionType
 from utils.terminal_bridge import TerminalBridge
 from utils.log_analyzer import LogAnalyzer
 from utils.session_report import SessionState, SummaryParser, ReportGenerator
+from utils.session_memory import SessionMemory
 from utils.display import (
     section, success, error, warning, info, diminfo, agent_msg,
     verdict_display, progress_spinner, progress_done,
@@ -58,6 +59,9 @@ class AutoMode:
         self._build_executed: bool = False  # Track if a build command has been run
         self._files_read: set[str] = set()  # Loop detection: files already read
         self._commands_executed: list[str] = []  # Loop detection: commands already run
+
+        # Persistent session memory (survives history trimming)
+        self._memory = SessionMemory()
 
         # Session tracking
         self.session = SessionState(
@@ -305,20 +309,35 @@ Start now: summarize historical failures, then suggest the verification build co
             output_summary=denoised[:200],
         )
 
-        # Report to agent with verify-aware prompting
+        # Record command and result in memory
+        self._memory.add_command(command, status)
+        if return_code != 0:
+            self._memory.add_error(f"Command failed: {command[:60]} (exit code: {return_code})")
+
+        # Report to agent with verify-aware prompting and session context
         thinking_start("analyzing build output")
         progress_spinner("Agent analyzing results")
-        response = self.gemini.chat_main(
-            f"Command executed: `{command}`\n"
-            f"Exit code: {return_code}\n"
-            f"Status: {status}\n\n"
-            f"Denoised output:\n```\n{denoised}\n```\n\n"
-            "Analyze the output:\n"
-            "1. If this was the verification build, compare errors with historical logs — do they match?\n"
-            "2. If this was a fix verification, did the build pass now?\n"
-            "3. Provide the next command, a file operation, or a VERDICT with SUMMARY block.\n"
-            "4. If the build succeeded, provide SUMMARY block and VERDICT: BUILD_FIXED."
-        )
+
+        # Inject session context
+        context_block = self._memory.get_context_block()
+        prompt = f"""{context_block}
+
+Command executed: `{command}`
+Exit code: {return_code}
+Status: {status}
+
+Denoised output:
+```
+{denoised}
+```
+
+Analyze the output:
+1. If this was the verification build, compare errors with historical logs — do they match?
+2. If this was a fix verification, did the build pass now?
+3. Provide the next command, a file operation, or a VERDICT with SUMMARY block.
+4. If the build succeeded, provide SUMMARY block and VERDICT: BUILD_FIXED."""
+
+        response = self.gemini.chat_main(prompt)
         progress_done()
         agent_msg(response)
 
@@ -333,11 +352,13 @@ Start now: summarize historical failures, then suggest the verification build co
         # Loop detection: skip files already read
         if filepath in self._files_read:
             diminfo(f"Skipping already-read file: {filepath}")
-            # Just remind the agent it already has this file
-            self.gemini.chat_main(
-                f"You already read {filepath} earlier in this session. "
-                "Please use the content from before. What's the next step?"
-            )
+            # Just remind the agent it already has this file (with session context)
+            context_block = self._memory.get_context_block()
+            prompt = f"""{context_block}
+
+You already read {filepath} earlier in this session.
+Please use the content from before. What's the next step?"""
+            self.gemini.chat_main(prompt)
             return
         self._files_read.add(filepath)
 
@@ -346,8 +367,16 @@ Start now: summarize historical failures, then suggest the verification build co
 
         if content.startswith("[Error"):
             tool_result("Read", "error", content)
+            self._memory.add_error(f"Could not read {filepath}")
         else:
             tool_result("Read", "success", f"{len(content.splitlines())} lines")
+            # Record file read in memory
+            summary = f"{len(content.splitlines())} lines"
+            first_lines = content.split("\n")[:3]
+            if first_lines:
+                content_preview = " ".join(first_lines)[:80]
+                summary = f"{len(content.splitlines())} lines — {content_preview}"
+            self._memory.add_file_read(filepath, summary)
 
         self.session.add_step(
             f"Read file: {filepath}",
@@ -357,10 +386,19 @@ Start now: summarize historical failures, then suggest the verification build co
 
         thinking_start("analyzing file contents")
         progress_spinner("Agent analyzing file")
-        response = self.gemini.chat_main(
-            f"Content of {filepath}:\n```\n{content}\n```\n\n"
-            "Continue your analysis. What's next?"
-        )
+
+        # Inject session context
+        context_block = self._memory.get_context_block()
+        prompt = f"""{context_block}
+
+Content of {filepath}:
+```
+{content}
+```
+
+Continue your analysis. What's next?"""
+
+        response = self.gemini.chat_main(prompt)
         progress_done()
         agent_msg(response)
         self._check_verdict(response)
@@ -383,27 +421,43 @@ Start now: summarize historical failures, then suggest the verification build co
                 result="success",
             )
 
+            # Record edit in memory
+            change_desc = new_content[:80] if len(new_content) < 80 else new_content[:77] + "..."
+            self._memory.add_file_edit(filepath, change_desc)
+            self._memory.add_observation(f"Applied fix to {filepath}")
+
             thinking_start("planning verification build")
             progress_spinner("Agent planning next step")
-            response = self.gemini.chat_main(
-                f"Successfully edited {filepath}. "
-                "Now run the build again to verify the fix. "
-                "Suggest the build command."
-            )
+
+            # Inject session context
+            context_block = self._memory.get_context_block()
+            prompt = f"""{context_block}
+
+Successfully edited {filepath}.
+Now run the build again to verify the fix.
+Suggest the build command."""
+
+            response = self.gemini.chat_main(prompt)
             progress_done()
             agent_msg(response)
             self._check_verdict(response)
         else:
             tool_result("Edit", "error", f"Cannot edit {filepath} — not a build file or permission denied")
             self.session.add_step(f"Failed to edit: {filepath}", result="failed")
+            self._memory.add_error(f"Could not edit {filepath}")
 
             thinking_start("adjusting approach")
             progress_spinner("Agent adjusting approach")
-            response = self.gemini.chat_main(
-                f"Could not edit {filepath}. It may not be a build configuration file. "
-                "If this fix requires editing source code, provide SUMMARY block and declare "
-                "BUILD_UNFIXABLE_PROJECT_CHANGES_REQUIRED. Otherwise, suggest an alternative."
-            )
+
+            # Inject session context
+            context_block = self._memory.get_context_block()
+            prompt = f"""{context_block}
+
+Could not edit {filepath}. It may not be a build configuration file.
+If this fix requires editing source code, provide SUMMARY block and declare
+BUILD_UNFIXABLE_PROJECT_CHANGES_REQUIRED. Otherwise, suggest an alternative."""
+
+            response = self.gemini.chat_main(prompt)
             progress_done()
             agent_msg(response)
             self._check_verdict(response)
@@ -412,13 +466,18 @@ Start now: summarize historical failures, then suggest the verification build co
         """Ask the agent to provide the next concrete action."""
         thinking_start("deciding next action")
         progress_spinner("Requesting next action from agent")
-        response = self.gemini.chat_main(
-            "Please provide a concrete next step: "
-            "either a command to run (in a ```bash block), "
-            "a file to read (READ_FILE: <path>), "
-            "a file to edit (EDIT_FILE: <path>), "
-            "or a final VERDICT with SUMMARY block."
-        )
+
+        # Inject session context
+        context_block = self._memory.get_context_block()
+        prompt = f"""{context_block}
+
+Please provide a concrete next step:
+either a command to run (in a ```bash block),
+a file to read (READ_FILE: <path>),
+a file to edit (EDIT_FILE: <path>),
+or a final VERDICT with SUMMARY block."""
+
+        response = self.gemini.chat_main(prompt)
         progress_done()
         agent_msg(response)
         self._check_verdict(response)
@@ -499,9 +558,9 @@ Start now: summarize historical failures, then suggest the verification build co
                 self.session.steps,
             )
 
-            # Generate .sh fix script
+            # Generate .sh fix script (with memory context)
             try:
-                script_path = ReportGenerator.generate_fix_script(self.session, self.output_dir)
+                script_path = ReportGenerator.generate_fix_script(self.session, self.output_dir, memory=self._memory)
                 script_generated(script_path, os.path.basename(script_path))
             except Exception as e:
                 warning(f"Could not generate fix script: {e}")

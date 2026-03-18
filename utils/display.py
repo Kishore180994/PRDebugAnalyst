@@ -5,7 +5,7 @@ Built on the `rich` library for polished, Claude Code-style terminal UI.
 Features:
   - Rich markdown rendering for agent messages
   - Animated spinners
-  - Clean panels for commands, edits, verdicts
+  - Dashboard-style panels for commands, edits, verdicts
   - Auto-copy to clipboard for single commands
   - Copyable plain-text command blocks (no box-drawing interference)
 """
@@ -27,6 +27,7 @@ from rich.syntax import Syntax
 from rich.spinner import Spinner as RichSpinner
 from rich.live import Live
 from rich.theme import Theme
+from rich.align import Align
 from rich import box
 
 import threading
@@ -55,6 +56,9 @@ _THEME = Theme({
     "verdict.fail": "bold red",
     "step":        "bold blue",
     "section":     "bold blue",
+    "primary":     "bold cyan",
+    "secondary":   "bold magenta",
+    "accent":      "bold yellow",
 })
 
 console = Console(theme=_THEME, highlight=False)
@@ -188,32 +192,60 @@ def interrupted_msg():
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-#  Banner
+#  Banner — Large, colorful ASCII art style
 # ═══════════════════════════════════════════════════════════════════════════
 
 def banner():
-    """Print the application banner."""
+    """Print the application banner with stylized title."""
     console.print()
-    console.print("  [bold blue]PR Debug Analyst[/bold blue]  [dim]v1.0[/dim]")
-    console.print("  [dim]AI-powered Android build failure debugger • Gemini[/dim]")
-    console.print(Rule(style="dim blue"))
+
+    # Stylized title art
+    title_text = Text()
+    title_text.append("╔══════════════════════════════════════════════════════╗\n", style="cyan")
+    title_text.append("║  ", style="cyan")
+    title_text.append("PR DEBUG ANALYST", style="bold magenta")
+    title_text.append("  ", style="cyan")
+    title_text.append("║\n", style="cyan")
+    title_text.append("╚══════════════════════════════════════════════════════╝", style="cyan")
+
+    console.print(Align.center(title_text))
+    console.print()
+
+    # Info row
+    info_text = Text()
+    info_text.append("v1.0  ", style="dim yellow")
+    info_text.append("•  ", style="dim")
+    info_text.append("AI-powered Android build failure debugger", style="dim cyan")
+    info_text.append("  •  ", style="dim")
+    info_text.append("Gemini", style="dim yellow")
+    console.print(Align.center(info_text))
     console.print()
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-#  Section / Headers
+#  Section / Headers — Bold colored panel headers
 # ═══════════════════════════════════════════════════════════════════════════
 
 def section(title: str):
-    """Print a section divider."""
+    """Print a section divider with bold colored header."""
     console.print()
-    console.print(Rule(f"[bold blue] {title} [/bold blue]", style="blue"))
+    header_text = Text()
+    header_text.append("  ▌ ", style="bold cyan")
+    header_text.append(title, style="bold cyan")
+    header_text.append("  ", style="bold cyan")
+    console.print(Panel(
+        header_text,
+        border_style="cyan",
+        padding=(0, 1),
+        box=box.ROUNDED,
+        expand=False,
+    ))
     console.print()
 
 
 def subsection(title: str):
     """Print a lighter subsection header."""
-    console.print(f"\n  [cyan]{title}[/cyan]")
+    console.print(f"\n  [cyan]▸ {title}[/cyan]")
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -238,21 +270,24 @@ def diminfo(msg: str):
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-#  Agent Message — Rich Markdown rendering
+#  Agent Message — Rich Markdown rendering with colored left border
 # ═══════════════════════════════════════════════════════════════════════════
 
 def agent_msg(msg: str):
-    """Render the AI agent's response using rich Markdown inside a panel."""
+    """Render the AI agent's response using rich Markdown inside a dashboard panel."""
     console.print()
     md = Markdown(msg, code_theme="monokai")
+
+    # Create a visually distinct agent panel with colored left border
     console.print(
         Panel(
             md,
-            title="[bold medium_purple1]Agent[/bold medium_purple1]",
+            title="[bold magenta]🤖 Agent Response[/bold magenta]",
             title_align="left",
-            border_style="medium_purple1",
+            border_style="magenta",
             padding=(1, 2),
             expand=True,
+            box=box.ROUNDED,
         )
     )
     console.print()
@@ -279,19 +314,26 @@ def user_prompt(prompt_text: str = "") -> str:
 def command_display(command: str, auto_copy: bool = True):
     """
     Display a command for the user to run in Terminal A.
-
-    The command is printed as plain text (no box-drawing around the actual
-    command string) so terminal copy-paste grabs just the command.
-
-    If auto_copy=True and this is a single command, it is automatically
-    copied to the clipboard.
+    Uses a dark-background panel with TERMINAL badge and syntax highlighting.
     """
     console.print()
-    console.print("  [bold yellow]Run in Terminal A:[/bold yellow]")
-    console.print()
 
-    # Print the raw command as plain text — easy to triple-click & copy
-    console.print(f"  {command}")
+    # Create syntax-highlighted command
+    syntax = Syntax(command, "bash", theme="monokai", line_numbers=False, padding=1)
+
+    # Terminal badge
+    badge = Text()
+    badge.append("⌘ TERMINAL", style="bold cyan on grey11")
+
+    console.print(Panel(
+        syntax,
+        title=badge,
+        title_align="left",
+        border_style="cyan",
+        padding=(0, 1),
+        expand=True,
+        box=box.ROUNDED,
+    ))
     console.print()
 
     # Auto-copy to clipboard
@@ -307,135 +349,167 @@ def command_display(command: str, auto_copy: bool = True):
 
 def commands_display(commands: list[str]):
     """
-    Display multiple commands. Does NOT auto-copy (user picks which to copy).
-    Each command is on its own line for easy individual selection.
+    Display multiple commands in a numbered, syntax-highlighted panel.
     """
     console.print()
-    console.print("  [bold yellow]Run in Terminal A:[/bold yellow]")
-    console.print()
 
+    # Build multi-line command display
+    cmd_text = ""
     for i, cmd in enumerate(commands, 1):
-        console.print(f"  [dim]{i}.[/dim] {cmd}")
+        cmd_text += f"{i}. {cmd}\n"
 
+    syntax = Syntax(cmd_text.rstrip(), "bash", theme="monokai", line_numbers=False, padding=1)
+
+    console.print(Panel(
+        syntax,
+        title="[bold cyan]⌘ TERMINAL COMMANDS[/bold cyan]",
+        title_align="left",
+        border_style="cyan",
+        padding=(0, 1),
+        expand=True,
+        box=box.ROUNDED,
+    ))
     console.print()
+
     console.print(f"  [dim]ℹ Select a command line to copy it[/dim]")
     console.print(f"  [dim]Then press Enter here to scan the output[/dim]")
     console.print()
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-#  Verdict Display
+#  Verdict Display — Full-width styled panel
 # ═══════════════════════════════════════════════════════════════════════════
 
 def verdict_display(verdict: str, reason: str):
-    """Display the final verdict prominently."""
+    """Display the final verdict prominently with styled borders."""
     is_success = verdict == "BUILD_FIXED"
     style = "green" if is_success else "red"
     icon = "✅" if is_success else "❌"
+    border_box = box.DOUBLE if is_success else box.HEAVY
 
     verdict_text = Text()
-    verdict_text.append(f"  {icon}  {verdict}\n\n", style=f"bold {style}")
+    verdict_text.append(f"{icon}  {verdict}\n\n", style=f"bold {style}")
     if reason:
-        verdict_text.append(f"  {reason}", style="dim")
+        verdict_text.append(f"{reason}", style="dim")
 
     console.print()
     console.print(Panel(
         verdict_text,
+        title=f"[bold {style}]VERDICT[/bold {style}]",
+        title_align="center",
         border_style=style,
         padding=(1, 2),
         expand=True,
+        box=border_box,
     ))
     console.print()
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-#  Log Summary Table
+#  Log Summary Table — Rich table inside panel
 # ═══════════════════════════════════════════════════════════════════════════
 
 def log_summary_table(log_summaries: list[dict]):
-    """Display historical log summaries in a rich table."""
+    """Display historical log summaries in a rich formatted table."""
     if not log_summaries:
         warning("No log files found in the tasks folder.")
         return
 
     section(f"Historical Build Logs — {len(log_summaries)} file(s)")
 
+    # Create table
+    table = Table(
+        show_header=True,
+        box=box.ROUNDED,
+        border_style="cyan",
+        padding=(0, 1),
+    )
+    table.add_column("#", style="dim yellow", justify="center", width=3)
+    table.add_column("PR ID", style="bold cyan", width=15)
+    table.add_column("File", style="bold white", width=30)
+    table.add_column("Errors", style="red", width=20)
+    table.add_column("Failed Tasks", style="yellow", width=25)
+
     for i, log in enumerate(log_summaries, 1):
         pr_id = log.get("pr_id", "Unknown")
         filename = log.get("filename", "Unknown")
         errors = log.get("errors", [])
         failed_tasks = log.get("failed_tasks", [])
-        rel_path = log.get("rel_path", filename)
-        match_source = log.get("match_source", "")
-        pr_refs = log.get("pr_refs_in_file", [])
 
-        # Header
-        badge = f"  [on grey23][green]{match_source}[/green][/on grey23]" if match_source else ""
-        console.print(f"  [bold blue]{i}.[/bold blue] [bold white]{pr_id}[/bold white]  [dim]{rel_path}[/dim]{badge}")
-
-        # PR refs
-        if pr_refs:
-            refs_str = ", ".join(pr_refs[:3])
-            console.print(f"     [dim]refs: {refs_str}[/dim]")
-
-        # Errors
+        # Format errors
+        error_str = ""
         if errors:
-            for err in errors[:3]:
-                console.print(f"     [red]•[/red] {err['type']}  [dim]×{err['count']}[/dim]")
+            error_types = [f"{e['type']} ×{e['count']}" for e in errors[:2]]
+            error_str = ", ".join(error_types)
         else:
-            console.print(f"     [dim]no recognized error patterns[/dim]")
+            error_str = "[dim]none[/dim]"
 
-        # Failed tasks
+        # Format failed tasks
+        task_str = ""
         if failed_tasks:
-            tasks_str = ", ".join(failed_tasks[:5])
-            console.print(f"     [yellow]failed:[/yellow] {tasks_str}")
+            task_str = ", ".join(failed_tasks[:3])
+        else:
+            task_str = "[dim]none[/dim]"
 
-        console.print()
+        table.add_row(str(i), pr_id, filename, error_str, task_str)
+
+    console.print(Panel(table, border_style="cyan", padding=(0, 0), box=box.ROUNDED))
+    console.print()
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-#  Manual Mode Help
+#  Manual Mode Help — Table inside panel
 # ═══════════════════════════════════════════════════════════════════════════
 
 def manual_mode_help():
-    """Display the manual mode action reference."""
+    """Display the manual mode action reference in a styled table."""
     console.print()
-    table = Table(show_header=False, box=None, padding=(0, 2), show_edge=False)
-    table.add_column("Key", style="bold white on grey23", min_width=8, justify="center")
-    table.add_column("Action")
+    table = Table(show_header=True, box=box.ROUNDED, border_style="cyan", padding=(0, 1))
+    table.add_column("Key", style="bold yellow", justify="center", width=12)
+    table.add_column("Action", style="white")
 
-    table.add_row("Enter",  "Scan logs → denoise → feed to agent")
-    table.add_row("done",   "[green]Mark step as successful[/green]")
-    table.add_row("fail",   "[red]Mark step as failed[/red]")
-    table.add_row("quit",   "[yellow]Exit session[/yellow]")
+    table.add_row("[bold cyan]Enter[/bold cyan]", "Scan logs → denoise → feed to agent")
+    table.add_row("[bold green]done[/bold green]", "Mark step as successful")
+    table.add_row("[bold red]fail[/bold red]", "Mark step as failed")
+    table.add_row("[bold yellow]quit[/bold yellow]", "Exit session")
 
-    console.print(table)
+    console.print(Panel(
+        table,
+        title="[bold cyan]⌨ Controls[/bold cyan]",
+        border_style="cyan",
+        padding=(0, 0),
+        box=box.ROUNDED,
+    ))
     console.print("  [dim]Or type any message to chat with the agent[/dim]")
     console.print()
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-#  Step indicator
+#  Step indicator — Status bar style
 # ═══════════════════════════════════════════════════════════════════════════
 
 def step_prompt(step_num: int):
     """Display the step indicator before user input."""
     console.print()
-    console.print(Rule(style="dim"))
-    console.print(f"  [bold blue]Step {step_num}[/bold blue]  [dim]enter · done · fail · quit · or type[/dim]")
+    step_text = Text()
+    step_text.append("━━━ ", style="dim cyan")
+    step_text.append(f"Step {step_num}", style="bold cyan")
+    step_text.append(" ━━━━━━━━━━━━━━━━━━━━━━━━━", style="dim cyan")
+    console.print(step_text)
+    console.print(f"  [dim]enter · done · fail · quit · or type[/dim]")
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-#  File edit preview
+#  File edit preview — Syntax highlighted with header
 # ═══════════════════════════════════════════════════════════════════════════
 
 def file_edit_preview(filepath: str, content: str, max_lines: int = 15):
-    """Show a preview of a file edit."""
+    """Show a preview of a file edit with syntax highlighting."""
     lines = content.split("\n")
     shown = "\n".join(lines[:max_lines])
     overflow = ""
     if len(lines) > max_lines:
-        overflow = f"\n[dim]... +{len(lines) - max_lines} more lines[/dim]"
+        overflow = f"... +{len(lines) - max_lines} more lines"
 
     # Try to guess language from filepath
     lang = "groovy"
@@ -450,16 +524,23 @@ def file_edit_preview(filepath: str, content: str, max_lines: int = 15):
     elif filepath.endswith(".pro") or filepath.endswith(".cfg"):
         lang = "text"
 
-    syntax = Syntax(shown, lang, theme="monokai", line_numbers=False, padding=1)
+    syntax = Syntax(shown, lang, theme="monokai", line_numbers=True, padding=1)
+
+    # Build header with filename and line info
+    header_text = Text()
+    header_text.append("✏ ", style="bold yellow")
+    header_text.append(filepath, style="bold white")
+    header_text.append(f"  ({len(lines)} lines)", style="dim yellow")
 
     console.print()
     console.print(Panel(
         syntax,
-        title=f"[bold orange1]Edit: {filepath}[/bold orange1]",
+        title=header_text,
         title_align="left",
         subtitle=overflow if overflow else None,
-        border_style="orange1",
+        border_style="yellow",
         padding=(0, 1),
+        box=box.ROUNDED,
     ))
     console.print()
 
@@ -492,25 +573,33 @@ def thinking_summary(text: str, max_lines: int = 3):
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-#  Tool Use Indicators
+#  Tool Use Indicators — Colored inline badges
 # ═══════════════════════════════════════════════════════════════════════════
 
 def tool_use(tool_name: str, detail: str = ""):
-    """Show a tool being invoked."""
+    """Show a tool being invoked with colored badge."""
+    badge = Text()
+    badge.append(f"[{tool_name}]", style="bold cyan on grey11")
     detail_text = f"  [dim]{detail}[/dim]" if detail else ""
-    console.print(f"  [cyan]⬡[/cyan] [bold cyan]{tool_name}[/bold cyan]{detail_text}")
+    console.print(f"  {badge}{detail_text}")
 
 
 def tool_result(tool_name: str, status: str = "success", detail: str = ""):
-    """Show the result of a tool call."""
+    """Show the result of a tool call with status badge."""
     if status == "success":
-        icon = "[green]✓[/green]"
+        icon = "✓"
+        style = "green"
     elif status == "error":
-        icon = "[red]✗[/red]"
+        icon = "✗"
+        style = "red"
     else:
-        icon = "[yellow]![/yellow]"
+        icon = "!"
+        style = "yellow"
+
+    badge = Text()
+    badge.append(f"[{tool_name}]", style=f"bold {style} on grey11")
     detail_text = f"  [dim]{detail}[/dim]" if detail else ""
-    console.print(f"  {icon} [dim]{tool_name}[/dim]{detail_text}")
+    console.print(f"  [{style}]{icon}[/{style}] {badge}{detail_text}")
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -534,17 +623,54 @@ def work_end():
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-#  Session Stats
+#  Session Stats — Horizontal layout with colored boxes
 # ═══════════════════════════════════════════════════════════════════════════
 
 def session_stats(steps: int, turns: int, duration_sec: float = 0):
-    """Show session statistics."""
-    parts = [f"steps: {steps}", f"turns: {turns}"]
+    """Show session statistics in a compact dashboard format."""
+    console.print()
+
+    # Build columns
+    stats_cols = []
+
+    # Steps box
+    steps_text = Text(str(steps), style="bold yellow")
+    stats_cols.append(Panel(
+        steps_text,
+        title="[dim]Steps[/dim]",
+        border_style="yellow",
+        padding=(0, 2),
+        expand=True,
+        box=box.ROUNDED,
+    ))
+
+    # Turns box
+    turns_text = Text(str(turns), style="bold cyan")
+    stats_cols.append(Panel(
+        turns_text,
+        title="[dim]Turns[/dim]",
+        border_style="cyan",
+        padding=(0, 2),
+        expand=True,
+        box=box.ROUNDED,
+    ))
+
+    # Time box
     if duration_sec > 0:
         mins = int(duration_sec // 60)
         secs = int(duration_sec % 60)
-        parts.append(f"time: {mins}m {secs}s")
-    console.print(f"  [dim]{' · '.join(parts)}[/dim]")
+        time_str = f"{mins}m {secs}s"
+        time_text = Text(time_str, style="bold magenta")
+        stats_cols.append(Panel(
+            time_text,
+            title="[dim]Time[/dim]",
+            border_style="magenta",
+            padding=(0, 2),
+            expand=True,
+            box=box.ROUNDED,
+        ))
+
+    console.print(Columns(stats_cols, expand=True))
     console.print()
 
 
@@ -565,100 +691,208 @@ def log_lines(raw_lines: str, max_lines: int = 8, label: str = ""):
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-#  Final Report Display
+#  Final Report Display — Full dashboard panels with tables
 # ═══════════════════════════════════════════════════════════════════════════
 
 def report_success(pr_link: str, root_cause: str, fix: str, files: list[dict], steps: list):
-    """Display a polished success report."""
-    content = Text()
-    content.append("  ✅  BUILD FIXED\n\n", style="bold green")
-    content.append(f"  PR          ", style="dim")
-    content.append(f"{pr_link}\n")
-    content.append(f"  Root cause  ", style="dim")
-    content.append(f"{root_cause}\n")
-    content.append(f"  Fix         ", style="dim")
-    content.append(f"{fix}\n")
+    """Display a polished success report with dashboard panels."""
+    console.print()
 
+    # Main verdict
+    verdict_panel = Text()
+    verdict_panel.append("✅  BUILD FIXED\n\n", style="bold green")
+
+    # Info table
+    info_table = Table(show_header=False, box=None, padding=(0, 1), show_edge=False)
+    info_table.add_column("Label", style="dim", width=15)
+    info_table.add_column("Value", style="white")
+
+    info_table.add_row("PR", pr_link)
+    info_table.add_row("Root cause", root_cause)
+    info_table.add_row("Fix", fix)
+
+    console.print(Panel(
+        info_table,
+        title="[bold green]Success Report[/bold green]",
+        border_style="green",
+        padding=(1, 1),
+        expand=True,
+        box=box.ROUNDED,
+    ))
+
+    # Files changed
     if files:
-        content.append(f"\n  Files changed:\n", style="dim")
-        for fc in files:
-            content.append(f"    • ", style="green")
-            content.append(f"{fc['file']}\n", style="bold white")
-            content.append(f"      {fc['change']}\n", style="dim")
+        console.print()
+        files_table = Table(show_header=True, box=box.ROUNDED, border_style="green", padding=(0, 1))
+        files_table.add_column("File", style="bold white")
+        files_table.add_column("Change", style="dim")
 
+        for fc in files:
+            files_table.add_row(fc['file'], fc['change'])
+
+        console.print(Panel(
+            files_table,
+            title="[bold green]Files Changed[/bold green]",
+            border_style="green",
+            padding=(0, 0),
+            box=box.ROUNDED,
+        ))
+
+    # Steps
     if steps:
-        content.append(f"\n  Steps:\n", style="dim")
-        for step in steps:
+        console.print()
+        steps_table = Table(show_header=True, box=box.ROUNDED, border_style="green", padding=(0, 1))
+        steps_table.add_column("#", justify="center", width=3)
+        steps_table.add_column("Step", style="white")
+        steps_table.add_column("Result", justify="center", width=10)
+
+        for idx, step in enumerate(steps, 1):
             desc = step.description if hasattr(step, 'description') else str(step)
             result = step.result if hasattr(step, 'result') else ""
+
             if result == "success":
-                content.append(f"    ✓ ", style="green")
+                result_str = "[green]✓[/green]"
             elif result == "failed":
-                content.append(f"    ✗ ", style="red")
+                result_str = "[red]✗[/red]"
             else:
-                content.append(f"    → ", style="dim")
-            content.append(f"{desc}\n")
+                result_str = "[dim]→[/dim]"
+
+            steps_table.add_row(str(idx), desc, result_str)
+
+        console.print(Panel(
+            steps_table,
+            title="[bold green]Steps[/bold green]",
+            border_style="green",
+            padding=(0, 0),
+            box=box.ROUNDED,
+        ))
 
     console.print()
-    console.print(Panel(content, border_style="green", padding=(1, 1), expand=True))
 
 
 def report_failure(pr_link: str, verdict: str, root_cause: str, why: str,
                    steps: list, hist_errors: list, live_errors: list):
-    """Display a polished failure report."""
-    content = Text()
-    content.append(f"  ❌  {verdict}\n\n", style="bold red")
-    content.append(f"  PR          ", style="dim")
-    content.append(f"{pr_link}\n")
-    content.append(f"  Root cause  ", style="dim")
-    content.append(f"{root_cause or 'Could not determine'}\n")
+    """Display a polished failure report with dashboard panels."""
+    console.print()
 
+    # Info table
+    info_table = Table(show_header=False, box=None, padding=(0, 1), show_edge=False)
+    info_table.add_column("Label", style="dim", width=15)
+    info_table.add_column("Value", style="white")
+
+    info_table.add_row("PR", pr_link)
+    info_table.add_row("Verdict", verdict)
+    info_table.add_row("Root cause", root_cause or "Could not determine")
+
+    console.print(Panel(
+        info_table,
+        title=f"[bold red]Failure Report[/bold red]",
+        border_style="red",
+        padding=(1, 1),
+        expand=True,
+        box=box.ROUNDED,
+    ))
+
+    # Historical errors
     if hist_errors:
-        content.append(f"\n  Historical errors:\n", style="dim")
-        for e in hist_errors[:5]:
-            content.append(f"    • {e}\n", style="dim")
+        console.print()
+        hist_table = Table(show_header=False, box=None, padding=(0, 1), show_edge=False)
+        hist_table.add_column("", width=1, style="red")
+        hist_table.add_column("Error", style="dim")
 
+        for err in hist_errors[:5]:
+            hist_table.add_row("•", err)
+
+        console.print(Panel(
+            hist_table,
+            title="[bold red]Historical Errors[/bold red]",
+            border_style="red",
+            padding=(0, 1),
+            box=box.ROUNDED,
+        ))
+
+    # Live errors
     if live_errors:
-        content.append(f"\n  Live errors:\n", style="dim")
-        for e in live_errors[:5]:
-            content.append(f"    • ", style="red")
-            content.append(f"{e}\n")
+        console.print()
+        live_table = Table(show_header=False, box=None, padding=(0, 1), show_edge=False)
+        live_table.add_column("", width=1, style="red")
+        live_table.add_column("Error", style="red")
 
+        for err in live_errors[:5]:
+            live_table.add_row("•", err)
+
+        console.print(Panel(
+            live_table,
+            title="[bold red]Live Errors[/bold red]",
+            border_style="red",
+            padding=(0, 1),
+            box=box.ROUNDED,
+        ))
+
+    # Steps attempted
     if steps:
-        content.append(f"\n  Steps attempted:\n", style="dim")
-        for step in steps:
+        console.print()
+        steps_table = Table(show_header=True, box=box.ROUNDED, border_style="red", padding=(0, 1))
+        steps_table.add_column("#", justify="center", width=3)
+        steps_table.add_column("Step", style="white")
+        steps_table.add_column("Result", justify="center", width=10)
+
+        for idx, step in enumerate(steps, 1):
             desc = step.description if hasattr(step, 'description') else str(step)
             result = step.result if hasattr(step, 'result') else ""
-            cmd = step.command if hasattr(step, 'command') and step.command else ""
-            if result == "success":
-                content.append(f"    ✓ ", style="green")
-            elif result == "failed":
-                content.append(f"    ✗ ", style="red")
-            else:
-                content.append(f"    → ", style="dim")
-            content.append(f"{desc}\n")
-            if cmd:
-                content.append(f"      $ {cmd[:70]}\n", style="dim")
 
+            if result == "success":
+                result_str = "[green]✓[/green]"
+            elif result == "failed":
+                result_str = "[red]✗[/red]"
+            else:
+                result_str = "[dim]→[/dim]"
+
+            steps_table.add_row(str(idx), desc, result_str)
+
+        console.print(Panel(
+            steps_table,
+            title="[bold red]Steps Attempted[/bold red]",
+            border_style="red",
+            padding=(0, 0),
+            box=box.ROUNDED,
+        ))
+
+    # Why unfixable
     if why:
-        content.append(f"\n  Why unfixable:\n", style="dim")
-        content.append(f"    {why}\n")
+        console.print()
+        console.print(Panel(
+            Text(why, style="dim"),
+            title="[bold red]Why Unfixable[/bold red]",
+            border_style="red",
+            padding=(1, 1),
+            box=box.ROUNDED,
+        ))
 
     console.print()
-    console.print(Panel(content, border_style="red", padding=(1, 1), expand=True))
 
 
 def script_generated(script_path: str, script_name: str):
     """Announce the generated fix script."""
     console.print()
-    console.print(f"  [green]⬡[/green] [bold green]Fix script generated[/bold green]")
-    console.print(f"    [bold white]{script_name}[/bold white]")
+
+    script_text = Text()
+    script_text.append("⬡ Fix script generated\n\n", style="bold green")
+    script_text.append(script_name, style="bold white")
+    script_text.append("\n\n", style="dim")
 
     run_cmd = f"cd /path/to/project && bash {script_name}"
-    console.print(f"    [dim]{run_cmd}[/dim]")
+    script_text.append(run_cmd, style="dim")
+
+    console.print(Panel(
+        script_text,
+        border_style="green",
+        padding=(1, 1),
+        box=box.ROUNDED,
+    ))
 
     # Auto-copy the run command
     if _copy_to_clipboard(run_cmd):
-        console.print(f"    [green]✓[/green] [dim]Run command copied to clipboard[/dim]")
+        console.print(f"  [green]✓[/green] [dim]Run command copied to clipboard[/dim]")
 
     console.print()

@@ -21,6 +21,7 @@ from agents.action_parser import ActionParser, ActionType
 from utils.terminal_bridge import TerminalBridge
 from utils.log_analyzer import LogAnalyzer
 from utils.session_report import SessionState, SummaryParser, ReportGenerator
+from utils.session_memory import SessionMemory
 from utils.display import (
     section, success, error, warning, info, diminfo, agent_msg,
     user_prompt, command_display, commands_display, verdict_display,
@@ -60,6 +61,9 @@ class ManualMode:
         self._files_read: set[str] = set()
         self._commands_suggested: list[str] = []
         self._build_verified: bool = False  # Track if a build has been run and verified
+
+        # Persistent session memory (survives history trimming)
+        self._memory = SessionMemory()
 
         # Session tracking
         self.session = SessionState(
@@ -234,10 +238,19 @@ declare BUILD_UNFIXABLE_PROJECT_CHANGES_REQUIRED."""
         denoised = self.gemini.denoise_logs(new_logs)
         progress_done(f"{len(denoised.splitlines())} lines kept")
 
-        # Feed to main agent
+        # Record observation from denoised logs
+        build_status = "SUCCESS" if any(kw in denoised.lower() for kw in ["build successful", "build success"]) else "FAILED"
+        self._memory.add_observation(f"Scanned logs (step {self._step_count}) — Build {build_status}")
+
+        # Feed to main agent with session context
         thinking_start("analyzing build output")
         progress_spinner("Agent analyzing logs")
-        prompt = f"""Here are the latest denoised build logs from Terminal A (step {self._step_count}):
+
+        # Inject session context at the top of the prompt
+        context_block = self._memory.get_context_block()
+        prompt = f"""{context_block}
+
+Here are the latest denoised build logs from Terminal A (step {self._step_count}):
 
 ```
 {denoised}
@@ -261,6 +274,7 @@ If you've reached a conclusion that this is unfixable, provide the SUMMARY block
         # Track build verification
         if any(kw in denoised.lower() for kw in ["build failed", "build successful", "build_failed", "build success"]):
             self._build_verified = True
+            self._memory.set_build_verified(True)
 
         # Track step
         self.session.add_step(
@@ -276,12 +290,19 @@ If you've reached a conclusion that this is unfixable, provide the SUMMARY block
         """User reports the last step was successful."""
         thinking_start("step succeeded — planning next")
         progress_spinner("Reporting success to agent")
-        response = self.gemini.chat_main(
-            f"Step {self._step_count} completed SUCCESSFULLY. "
-            "What should we do next? If the build is now passing, provide the full "
-            "SUMMARY block and declare VERDICT: BUILD_FIXED. "
-            "Otherwise, suggest the next command."
-        )
+
+        self._memory.add_observation(f"Step {self._step_count} completed successfully (user confirmed)")
+
+        # Inject session context
+        context_block = self._memory.get_context_block()
+        prompt = f"""{context_block}
+
+Step {self._step_count} completed SUCCESSFULLY.
+What should we do next? If the build is now passing, provide the full
+SUMMARY block and declare VERDICT: BUILD_FIXED.
+Otherwise, suggest the next command."""
+
+        response = self.gemini.chat_main(prompt)
         progress_done()
         agent_msg(response)
 
@@ -297,12 +318,20 @@ If you've reached a conclusion that this is unfixable, provide the SUMMARY block
         """User reports the last step failed."""
         thinking_start("step failed — adjusting approach")
         progress_spinner("Reporting failure to agent")
-        response = self.gemini.chat_main(
-            f"Step {self._step_count} FAILED. The command did not work as expected. "
-            "Please analyze what might have gone wrong and suggest an alternative approach. "
-            "If you believe this is unfixable without source code changes, provide the full "
-            "SUMMARY block and declare the appropriate VERDICT."
-        )
+
+        self._memory.add_observation(f"Step {self._step_count} failed (user reported)")
+        self._memory.add_error(f"Step {self._step_count} did not complete as expected")
+
+        # Inject session context
+        context_block = self._memory.get_context_block()
+        prompt = f"""{context_block}
+
+Step {self._step_count} FAILED. The command did not work as expected.
+Please analyze what might have gone wrong and suggest an alternative approach.
+If you believe this is unfixable without source code changes, provide the full
+SUMMARY block and declare the appropriate VERDICT."""
+
+        response = self.gemini.chat_main(prompt)
         progress_done()
         agent_msg(response)
 
@@ -318,7 +347,14 @@ If you've reached a conclusion that this is unfixable, provide the SUMMARY block
         """Send a free-text message from the user to the agent."""
         thinking_start("processing message")
         progress_spinner("Agent processing your message")
-        response = self.gemini.chat_main(f"User message: {message}")
+
+        # Inject session context with user message
+        context_block = self._memory.get_context_block()
+        prompt = f"""{context_block}
+
+User message: {message}"""
+
+        response = self.gemini.chat_main(prompt)
         progress_done()
         agent_msg(response)
 
@@ -447,6 +483,10 @@ If you've reached a conclusion that this is unfixable, provide the SUMMARY block
 
         self._commands_suggested.extend(commands)
 
+        # Record commands in memory for session context
+        for cmd in commands:
+            self._memory.add_command(cmd, "suggested")
+
         if len(commands) == 1:
             command_display(commands[0], auto_copy=True)
         else:
@@ -461,9 +501,19 @@ If you've reached a conclusion that this is unfixable, provide the SUMMARY block
             if content.startswith("[Error"):
                 tool_result("Read", "error", content)
                 results.append(f"File: {filepath}\n[Error: Could not read file]")
+                # Record error in memory
+                self._memory.add_error(f"Could not read {filepath}")
             else:
                 tool_result("Read", "success", f"{len(content.splitlines())} lines")
                 results.append(f"File: {filepath}\n```\n{content}\n```")
+                # Record file read in memory with a summary
+                summary = f"{len(content.splitlines())} lines"
+                # Try to capture key content from first 100 chars
+                first_lines = content.split("\n")[:3]
+                if first_lines:
+                    content_preview = " ".join(first_lines)[:80]
+                    summary = f"{len(content.splitlines())} lines — {content_preview}"
+                self._memory.add_file_read(filepath, summary)
 
             # Track that we've read this file
             self._files_read.add(filepath)
@@ -522,6 +572,11 @@ If you've reached a conclusion that this is unfixable, provide the SUMMARY block
                     f"Edited build file: {filepath}",
                     result="success",
                 )
+                # Record edit in memory
+                change_desc = new_content[:80] if len(new_content) < 80 else new_content[:77] + "..."
+                self._memory.add_file_edit(filepath, change_desc)
+                self._memory.add_observation(f"Applied fix to {filepath}")
+
                 # Notify agent but DON'T process response — user gets control
                 progress_spinner("Notifying agent of edit")
                 response = self.gemini.chat_main(
@@ -537,10 +592,12 @@ If you've reached a conclusion that this is unfixable, provide the SUMMARY block
             else:
                 error(f"Failed to write: {filepath}")
                 self.session.add_step(f"Failed to edit: {filepath}", result="failed")
+                self._memory.add_error(f"Failed to write to {filepath}")
                 info("The file may not be a build configuration file.")
         else:
             info("Edit skipped by user.")
             self.session.add_step(f"Edit declined by user: {filepath}", result="skipped")
+            self._memory.add_observation(f"Edit to {filepath} declined by user")
 
     # ── Final Reporting ─────────────────────────────────────────────────
 
@@ -558,9 +615,9 @@ If you've reached a conclusion that this is unfixable, provide the SUMMARY block
                 self.session.steps,
             )
 
-            # Generate .sh fix script
+            # Generate .sh fix script (with memory context)
             try:
-                script_path = ReportGenerator.generate_fix_script(self.session, self.output_dir)
+                script_path = ReportGenerator.generate_fix_script(self.session, self.output_dir, memory=self._memory)
                 script_generated(script_path, os.path.basename(script_path))
             except Exception as e:
                 warning(f"Could not generate fix script: {e}")
