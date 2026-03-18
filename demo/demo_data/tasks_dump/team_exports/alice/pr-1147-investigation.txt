@@ -1,0 +1,14 @@
+Investigation notes for PR #1147
+================================
+Alice's notes - 2026-03-11
+
+Looked at PR https://github.com/AcmeCorp/SuperApp/pull/1147
+The payment gateway feature adds a new :payment-config module.
+
+Build fails because :library depends on :payment-config with `implementation`
+but :app needs types from :payment-config transitively through :library.
+
+Fix: change library/build.gradle dependency from implementation to api.
+
+Haven't pushed the fix yet because need to verify it doesn't break
+the modularization rules we set up.

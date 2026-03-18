@@ -1,0 +1,6 @@
+stages:
+  - lint
+  - build
+  - test
+variables:
+  ANDROID_SDK: "/opt/android-sdk"

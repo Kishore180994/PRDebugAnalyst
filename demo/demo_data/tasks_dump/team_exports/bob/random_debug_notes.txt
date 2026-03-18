@@ -1,0 +1,4 @@
+Bob's debug notes
+- Need to update gradle wrapper to 8.6
+- Look into KSP migration from KAPT
+- Check flaky test: LoginActivityTest
