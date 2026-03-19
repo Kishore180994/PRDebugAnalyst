@@ -276,11 +276,21 @@ class TerminalBridge:
         except OSError as e:
             return f"Error: {e}"
 
+    # Directories to always skip during grep/find — generated artifacts,
+    # caches, and binaries that are huge and irrelevant to source analysis.
+    EXCLUDE_DIRS = [
+        "build", ".gradle", ".git", "node_modules", ".idea",
+        "__pycache__", ".cxx", ".externalNativeBuild", ".kotlin",
+        "captures", ".navigation", "intermediates", "generated",
+        "tmp", "caches", "transforms", "wrapper",
+    ]
+
     def grep_project(self, pattern: str, path: str = ".", file_glob: str = "",
                      max_results: int = 50) -> str:
         """
-        Search for a pattern in project files using grep.
-        Returns matching lines with file paths and line numbers.
+        Search for a pattern in project SOURCE files using grep.
+        Automatically excludes build/, .gradle/, .git/, node_modules/, etc.
+        to avoid scanning gigabytes of generated artifacts.
 
         Args:
             pattern: Regex pattern to search for
@@ -295,9 +305,23 @@ class TerminalBridge:
         try:
             import subprocess as sp
 
-            cmd = ["grep", "-rn", "--include=*"]
+            cmd = ["grep", "-rn"]
+
+            # Exclude heavy directories (build artifacts, caches, .git objects)
+            for d in self.EXCLUDE_DIRS:
+                cmd.append(f"--exclude-dir={d}")
+
+            # Exclude binary/archive files
+            cmd.extend([
+                "--exclude=*.jar", "--exclude=*.aar", "--exclude=*.class",
+                "--exclude=*.dex", "--exclude=*.apk", "--exclude=*.so",
+                "--exclude=*.png", "--exclude=*.jpg", "--exclude=*.webp",
+                "--exclude=*.zip", "--exclude=*.tar.gz",
+            ])
+
             if file_glob:
-                cmd = ["grep", "-rn", f"--include={file_glob}"]
+                cmd.append(f"--include={file_glob}")
+
             cmd.extend([pattern, target])
 
             result = sp.run(
@@ -315,7 +339,6 @@ class TerminalBridge:
             # Trim to max_results and make paths relative
             output_lines = []
             for line in lines[:max_results]:
-                # Make paths relative to project root
                 rel_line = line.replace(self.project_path + "/", "")
                 output_lines.append(rel_line)
 
@@ -325,7 +348,7 @@ class TerminalBridge:
 
             return f"--- GREP: '{pattern}' in {path} ({len(output_lines)} matches) ---\n{result_text}"
 
-        except subprocess.TimeoutExpired:
+        except sp.TimeoutExpired:
             return f"Error: Search timed out for pattern '{pattern}'"
         except FileNotFoundError:
             return "Error: grep command not found on this system"

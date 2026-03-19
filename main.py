@@ -47,21 +47,29 @@ def setup_config() -> Config:
         success("API key loaded")
 
     # ── Tasks Folder ────────────────────────────────────────────────────
+    default_tasks = os.path.expanduser("~/Downloads/Tasks")
+
     section("Tasks Folder (Historical Build Logs)")
-    info("Point to the folder containing your historical build failure logs.")
-    info("This folder will be scanned for .log, .txt, and other log files.")
+    info(f"Default: {default_tasks}")
+    info("Press Enter to accept, or type a different path.")
 
     while True:
-        tasks_path = user_prompt("Enter the path to your Tasks folder: ").strip()
-        tasks_path = os.path.expanduser(tasks_path)
+        raw = user_prompt(f"Tasks folder [{default_tasks}]: ").strip()
+        tasks_path = os.path.expanduser(raw) if raw else default_tasks
 
         if os.path.isdir(tasks_path):
             config.tasks_folder = tasks_path
             success(f"Tasks folder: {tasks_path}")
             break
         else:
-            error(f"Directory not found: {tasks_path}")
-            info("Please enter a valid directory path.")
+            # Try creating it
+            try:
+                os.makedirs(tasks_path, exist_ok=True)
+                config.tasks_folder = tasks_path
+                success(f"Created tasks folder: {tasks_path}")
+                break
+            except OSError:
+                error(f"Directory not found and could not create: {tasks_path}")
 
     return config
 
@@ -144,18 +152,35 @@ def setup_project(pr_link: str) -> str:
     return get_project_path_manual()
 
 
-def get_log_file_path() -> str:
-    """Prompt for the Terminal A log file path (manual mode)."""
-    info("In manual mode, we use the `script` command to record Terminal A output.")
-    info("Press Enter to use the default log file location, or enter a custom path.")
+def get_log_file_path(pr_link: str) -> str:
+    """
+    Derive the terminal log file path from the PR link.
+    Creates ~/.pr_terminal_logs/ and names the file after the repo.
+    No user prompt needed — fully automatic.
+    """
+    log_dir = os.path.expanduser("~/.pr_terminal_logs")
+    os.makedirs(log_dir, exist_ok=True)
 
-    log_path = user_prompt("Log file path (or Enter for default): ").strip()
-    if log_path:
-        log_path = os.path.expanduser(log_path)
-        # Create parent directory if needed
-        os.makedirs(os.path.dirname(log_path) or ".", exist_ok=True)
-        return log_path
-    return ""  # Will use default
+    # Derive filename from PR link: owner__repo-pr_123_terminal.log
+    pr_info = parse_pr_link(pr_link)
+    if pr_info:
+        log_name = f"{pr_info.owner}__{pr_info.repo}-pr_{pr_info.pr_number}_terminal.log"
+    else:
+        # Fallback: sanitize the PR link into a filename
+        import re
+        safe_name = re.sub(r'[^a-zA-Z0-9_-]', '_', pr_link.split('/')[-1])
+        log_name = f"pr_{safe_name}_terminal.log"
+
+    log_path = os.path.join(log_dir, log_name)
+
+    # Clean up old log for this PR (fresh start each session)
+    if os.path.exists(log_path):
+        try:
+            os.remove(log_path)
+        except OSError:
+            pass
+
+    return log_path
 
 
 def select_mode() -> str:
@@ -292,11 +317,8 @@ def main():
             warning(f"Web dashboard failed to start: {e}")
 
     if mode == "manual":
-        log_file = get_log_file_path()
-        bridge = TerminalBridge(project_path, log_file if log_file else None)
-
-        # Clear any stale log content and reset position
-        bridge.clear_log_file()
+        log_file = get_log_file_path(pr_link)
+        bridge = TerminalBridge(project_path, log_file)
 
         # Update web server with the log file path
         if args.web and web_url:

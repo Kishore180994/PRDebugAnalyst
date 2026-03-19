@@ -160,18 +160,17 @@ def setup_project_from_pr(pr_link: str) -> Optional[str]:
 
     info(f"Detected: {pr_info.owner}/{pr_info.repo} PR #{pr_info.pr_number}")
 
-    # ── Ask for parent directory ──
-    info("Where should the repo be cloned/located?")
-    info("Enter the parent directory (the repo folder will be inside it).")
+    # ── Parent directory — default to home ──
+    default_parent = os.path.expanduser("~")
+    info(f"Where should the repo be cloned? Default: {default_parent}")
 
     while True:
-        parent_dir = user_prompt("Parent directory: ").strip()
-        parent_dir = os.path.expanduser(parent_dir)
+        raw = user_prompt(f"Parent directory [{default_parent}]: ").strip()
+        parent_dir = os.path.expanduser(raw) if raw else default_parent
 
         if os.path.isdir(parent_dir):
             break
         else:
-            # Try creating it
             try:
                 os.makedirs(parent_dir, exist_ok=True)
                 success(f"Created: {parent_dir}")
