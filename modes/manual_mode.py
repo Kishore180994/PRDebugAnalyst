@@ -441,7 +441,7 @@ User message: {message}"""
                 # Display any edit requests from the new response
                 for action in new_actions:
                     if action.action_type == ActionType.EDIT_FILE:
-                        self._confirm_edit(action.content, action.metadata.get("new_content", ""))
+                        self._apply_edit(action.content, action.metadata.get("new_content", ""))
 
                 # If agent wants MORE files, just tell the user
                 more_files = [a.content for a in new_actions if a.action_type == ActionType.READ_FILE]
@@ -461,7 +461,7 @@ User message: {message}"""
         # ── Handle edit requests ──
         for action in actions:
             if action.action_type == ActionType.EDIT_FILE:
-                self._confirm_edit(action.content, action.metadata.get("new_content", ""))
+                self._apply_edit(action.content, action.metadata.get("new_content", ""))
 
         # Trim history if it's getting long
         self._trim_if_needed()
@@ -546,54 +546,42 @@ User message: {message}"""
 
         self._is_running = False
 
-    def _confirm_edit(self, filepath: str, new_content: str):
+    def _apply_edit(self, filepath: str, new_content: str):
         """
-        Ask user to confirm a build file edit.
-        After confirming/declining, notifies the agent but does NOT process
-        the agent's response — control returns to the user.
+        Auto-apply a build file edit. Shows the change but applies it
+        automatically — the write_project_file whitelist ensures only
+        build config files can be modified. User can revert via git.
         """
-        tool_use("Edit", filepath)
+        tool_use("Write", filepath)
         file_edit_preview(filepath, new_content)
-        confirm = user_prompt("Apply this edit? (yes/no): ").strip().lower()
 
-        if confirm in ("yes", "y"):
-            ok = self.bridge.write_project_file(filepath, new_content)
-            if ok:
-                success(f"File updated: {filepath}")
-                self.session.files_changed.append({
-                    "file": filepath,
-                    "change": new_content[:100] + "..." if len(new_content) > 100 else new_content,
-                })
-                self.session.add_step(
-                    f"Edited build file: {filepath}",
-                    result="success",
-                )
-                # Record edit in memory
-                change_desc = new_content[:80] if len(new_content) < 80 else new_content[:77] + "..."
-                self._memory.add_file_edit(filepath, change_desc)
-                self._memory.add_observation(f"Applied fix to {filepath}")
+        ok = self.bridge.write_project_file(filepath, new_content)
+        if ok:
+            success(f"File written: {filepath}")
+            self.session.files_changed.append({
+                "file": filepath,
+                "change": new_content[:100] + "..." if len(new_content) > 100 else new_content,
+            })
+            self.session.add_step(f"Wrote build file: {filepath}", result="success")
+            change_desc = new_content[:80] if len(new_content) < 80 else new_content[:77] + "..."
+            self._memory.add_file_edit(filepath, change_desc)
+            self._memory.add_observation(f"Applied fix to {filepath}")
 
-                # Notify agent but DON'T process response — user gets control
-                progress_spinner("Notifying agent of edit")
-                response = self.gemini.chat_main(
-                    f"Edit applied successfully to {filepath}. "
-                    "Now suggest running the build to verify the fix."
-                )
-                progress_done()
-                agent_msg(response)
-                # Display any commands from the response
-                actions = ActionParser.parse(response)
-                commands = [a.content for a in actions if a.action_type == ActionType.COMMAND]
-                self._display_commands(commands)
-            else:
-                error(f"Failed to write: {filepath}")
-                self.session.add_step(f"Failed to edit: {filepath}", result="failed")
-                self._memory.add_error(f"Failed to write to {filepath}")
-                info("The file may not be a build configuration file.")
+            # Notify agent — DON'T process response, user gets control
+            progress_spinner("Notifying agent of edit")
+            response = self.gemini.chat_main(
+                f"Edit applied successfully to {filepath}. "
+                "Now suggest running the build to verify the fix."
+            )
+            progress_done()
+            agent_msg(response)
+            actions = ActionParser.parse(response)
+            commands = [a.content for a in actions if a.action_type == ActionType.COMMAND]
+            self._display_commands(commands)
         else:
-            info("Edit skipped by user.")
-            self.session.add_step(f"Edit declined by user: {filepath}", result="skipped")
-            self._memory.add_observation(f"Edit to {filepath} declined by user")
+            error(f"Failed to write: {filepath} (not a build config file or permission denied)")
+            self.session.add_step(f"Failed to write: {filepath}", result="failed")
+            self._memory.add_error(f"Failed to write to {filepath}")
 
     # ── Final Reporting ─────────────────────────────────────────────────
 
