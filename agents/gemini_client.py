@@ -182,19 +182,25 @@ class GeminiClient:
         Strips noise but PRESERVES all actual log lines verbatim — no summarizing.
         Falls back to raw logs if all retries fail.
         """
-        prompt = f"""You are a log denoising agent. You are given raw output from a terminal session where an Android build is being debugged.
+        prompt = f"""You are a log denoising agent. Remove ONLY obvious noise. Be CONSERVATIVE — when in doubt, KEEP the line.
 
-Your job is to produce a "Clean View" of the logs for a senior engineer.
+REMOVE (clearly noise):
+- ANSI escape codes and color sequences
+- Download progress bars (e.g., [===>   ] 45%)
+- Repeated identical lines (keep first occurrence)
+- Gradle daemon startup messages
+- File download percentage updates
 
-RULES:
-1. REMOVE all ANSI escape codes, progress bars (e.g., [===>   ]), and repetitive status updates.
-2. REMOVE redundant or irrelevant system noise (e.g., shell environment prints that don't fail).
-3. PRESERVE all actual error messages, warnings, build failures, and the 'What went wrong' section.
-4. SUMMARIZE long Java stack traces by keeping the first 5 and last 2 relevant frames.
-5. KEEP the exact text of the relevant lines — do NOT paraphrase or summarize errors.
-6. DO NOT add commentary, explanations, or analysis. Just output the cleaned log lines.
+KEEP (important — do NOT remove):
+- ALL error messages, warnings, "BUILD FAILED", "BUILD SUCCESSFUL", "What went wrong"
+- ALL task names (":app:compileDebugKotlin FAILED")
+- ALL dependency resolution messages, file paths, compiler errors with line numbers
+- ALL stack trace frames (full traces, do not truncate)
+- Build config output (SDK versions, Java versions, Gradle version)
+- Command prompts and commands run ($ ./gradlew ...)
 
-If the logs are purely successful with no issues, respond with "NO_BUILD_ISSUES_DETECTED".
+Output cleaned lines EXACTLY as they appear. No paraphrasing, no commentary, no analysis. When in doubt, KEEP IT.
+If build succeeded with no issues, respond with "NO_BUILD_ISSUES_DETECTED".
 
 --- RAW TERMINAL LOGS ---
 {raw_logs}"""
@@ -205,7 +211,7 @@ If the logs are purely successful with no issues, respond with "NO_BUILD_ISSUES_
                 contents=prompt,
                 config=types.GenerateContentConfig(
                     temperature=0.0,
-                    max_output_tokens=4096,
+                    max_output_tokens=8192,
                 ),
             )
             return response.text or raw_logs
@@ -414,15 +420,15 @@ FAIL FAST RULES (DISCARD IF):
 - The failure is not a build issue (e.g., git merge conflict).
 
 YOUR TASK (Phase 1 – Initial Investigation):
-1. Call `search_historical_logs` to find build logs related to this PR.
+1. Call `search_historical_logs` to find build logs for this PR.
 2. Call `list_directory` on the project root.
-3. Read key build files: build.gradle(.kts), settings.gradle(.kts).
-4. Call `read_terminal_session_log` to check terminal context.
+3. Read the root build.gradle(.kts) — that's usually enough.
 
 *** CRITICAL RULES ***
-- SPEED IS PARAMOUNT: Read at most 1-2 files. DO NOT explore deep directories.
-- NEVER read the same file twice. If you already read it, use your context.
-- When you have enough context, STOP calling tools and output your summary.
+- MAXIMUM 3 tool calls total for Phase 1. Then STOP and output your summary.
+- DO NOT explore subdirectories. DO NOT read more than 2 files.
+- Use the historical logs + root build file to form your initial diagnosis.
+- When you have enough context, STOP calling tools IMMEDIATELY.
 
 ## Expected Output: Initial Forensic Summary
 - **PR Overview**: What this PR is trying to do.
@@ -445,40 +451,38 @@ YOUR TASK (Phase 1 – Initial Investigation):
             f"JAVA_HOME={java_home}, ANDROID_HOME={android_home}"
         )
 
-        return f"""You are an expert Android Build Engineer guiding a user through fixing a build.
+        return f"""You are an expert Android Build Engineer. You are ACTION-ORIENTED — diagnose fast, fix fast.
 
 CONTEXT:
 - PR: {pr_link}
 - Project Root: {project_root}
 - Platform: {platform_info}
 
-GOAL: Make `./gradlew assembleDebug` (or equivalent) succeed WITHOUT modifying
-application source code.
+GOAL: Make `./gradlew assembleDebug` (or equivalent) succeed WITHOUT modifying app source code.
 
-FIXING STRATEGIES (PREFERRED APPROACH):
-1. Shell Patching: Use sed, cp, echo, mkdir, wget to patch the build environment.
-2. Memory Issues (OOM/Timeout): echo "org.gradle.jvmargs=-Xmx4g" >> gradle.properties
-3. Missing Configs: cp mock google-services.json or create a dummy one with echo.
-4. Missing Dependencies: Download JAR/POM manually or inject maven repositories.
-5. Wrong Command: Identify the correct assemble task.
-6. DISCARD: If build requires NPM, Rust, NDK, CMake → "BUILD UNFIXABLE — type 'fail'".
+FIXING STRATEGIES:
+1. Shell Patching: sed, cp, echo, mkdir, wget to patch build environment.
+2. OOM: echo "org.gradle.jvmargs=-Xmx4g" >> gradle.properties
+3. Missing Configs: cp mock google-services.json or create dummy with echo.
+4. Missing Dependencies: Download JAR or inject maven repos.
+5. Wrong Command: Find the correct assemble task.
+6. DISCARD: NPM/Rust/NDK/CMake required → "BUILD UNFIXABLE — type 'fail'".
 
-PROTOCOL:
-1. Review the SYSTEM STATE. DO NOT re-read files/directories already cached.
-2. Read the latest terminal logs using `read_terminal_session_log`.
-3. Focus ONLY on actual errors from the denoised log output.
-4. If build shows "BUILD SUCCESSFUL", output "BUILD SUCCEEDED — type 'done'."
-5. When formulating instructions, put commands in a SINGLE fenced code block.
+*** CRITICAL BEHAVIOR RULES ***
+1. DO NOT EXPLORE. You already have the error from the terminal logs. Diagnose from that.
+2. MAXIMUM 2 tool calls per turn. If you need a file, read it. Then STOP and give your answer.
+3. Each response MUST end with a concrete action: either a command for the user to run, or a VERDICT.
+4. NEVER ask the user to run cat, ls, grep, or find. You have tools — use them silently if needed.
+5. NEVER re-read a file already in your context. Its content is in your history.
+6. DO NOT search for information you can infer from the error message. If the error says "Could not resolve com.example:lib:1.0", you know the dependency — fix it directly.
+7. ONE fix per turn. Suggest it, let the user rebuild, then assess the next error.
+8. If build shows "BUILD SUCCESSFUL", output "BUILD SUCCEEDED — type 'done'."
+9. Put fix commands in a SINGLE fenced code block.
 
-*** ANTI-HALLUCINATION & CACHE RULES ***
-- Trust the Denoising Agent. If a detail is not in the denoised log, ignore it.
-- NEVER guess file paths. Believe the user if they say a file doesn't exist.
-- NEVER call read_project_file or list_directory on paths already in your history.
-- SPEED IS PARAMOUNT: Read terminal logs ONCE per turn.
-- Use grep_project and find_files to locate things instead of manual exploration.
-- DO NOT re-read files you've already read. Use the information from previous reads.
-- NEVER declare BUILD_FIXED without actually seeing BUILD SUCCESSFUL in the logs.
-- Make FORWARD PROGRESS on each turn — don't loop on the same analysis."""
+*** ANTI-HALLUCINATION ***
+- Only reference errors you actually saw in the logs. Do not invent errors.
+- If you are unsure about a file path, use ONE tool call to check. Then commit to a fix.
+- NEVER loop: if you suggested the same fix twice, try a different approach or declare unfixable."""
 
     def phase3_success_prompt(self, pr_link: str, project_root: str,
                                 build_steps: list[str] = None) -> str:

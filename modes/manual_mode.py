@@ -219,13 +219,19 @@ declare BUILD_UNFIXABLE_PROJECT_CHANGES_REQUIRED."""
             diminfo("Run the command in Terminal A, then press Enter here again.")
             return
 
-        progress_done(f"{len(new_logs.splitlines())} lines")
+        line_count = len(new_logs.splitlines())
+        progress_done(f"{line_count} lines")
 
-        # Denoise the logs
-        tool_use("Denoise", f"{len(new_logs.splitlines())} raw lines")
-        progress_spinner("Denoising logs")
-        denoised = self.gemini.denoise_logs(new_logs)
-        progress_done(f"{len(denoised.splitlines())} lines kept")
+        # Only denoise if output is large (>100 lines). Short outputs are
+        # passed through raw — every line matters when output is small.
+        if line_count > 100:
+            tool_use("Denoise", f"{line_count} raw lines")
+            progress_spinner("Denoising logs")
+            denoised = self.gemini.denoise_logs(new_logs)
+            progress_done(f"{len(denoised.splitlines())} lines kept")
+        else:
+            denoised = new_logs
+            diminfo(f"Short output ({line_count} lines) — skipping denoise, using raw logs")
 
         # Record observation from denoised logs
         build_status = "SUCCESS" if any(kw in denoised.lower() for kw in ["build successful", "build success"]) else "FAILED"

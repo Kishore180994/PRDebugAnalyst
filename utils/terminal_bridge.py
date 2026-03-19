@@ -96,8 +96,10 @@ class TerminalBridge:
 
     def read_new_logs(self) -> str:
         """
-        Read any new content from the Terminal A log file.
-        Strips ANSI escape sequences that `script` command captures.
+        Read new content from Terminal A log file since last scan.
+        After reading, resets position to current end so next scan
+        only sees fresh output. The agent's history already has the
+        context of previous scans.
         """
         if not os.path.exists(self.log_file):
             return ""
@@ -108,7 +110,6 @@ class TerminalBridge:
                 new_content = f.read()
                 self._last_read_pos = f.tell()
             cleaned = self._strip_ansi(new_content)
-            # Cap terminal log size to prevent context blowup
             return self._truncate_output(cleaned)
         except (PermissionError, OSError):
             return ""
