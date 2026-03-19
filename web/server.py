@@ -49,6 +49,7 @@ _log_file: str = ""
 _log_position: int = 0
 _watching: bool = False
 _session_info: dict = {}
+_state_lock = threading.Lock()  # Protects _log_position and _log_file
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -127,11 +128,15 @@ def _watch_log_file():
 
         try:
             file_size = os.path.getsize(_log_file)
-            if file_size > _log_position:
+            with _state_lock:
+                pos = _log_position
+            if file_size > pos:
                 with open(_log_file, 'r', errors='replace') as f:
-                    f.seek(_log_position)
+                    f.seek(pos)
                     new_content = f.read()
-                    _log_position = f.tell()
+                    new_pos = f.tell()
+                with _state_lock:
+                    _log_position = new_pos
 
                 if new_content:
                     socketio.emit('terminal_output', {

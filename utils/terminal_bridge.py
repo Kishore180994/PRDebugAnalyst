@@ -33,18 +33,27 @@ class TerminalBridge:
     """
 
     @staticmethod
-    def _truncate_output(text: str, max_chars: int = MAX_TOOL_RESPONSE_CHARS) -> str:
+    def _truncate_output(text: str, max_chars: int = MAX_TOOL_RESPONSE_CHARS,
+                         tail_heavy: bool = False) -> str:
         """
         Truncate tool output to prevent context window blowup.
-        Keeps head + tail so the agent sees the beginning and end of output.
+        Keeps head + tail so the agent sees the beginning and end.
+
+        If tail_heavy=True, keeps 20% head + 80% tail. This is for
+        terminal logs where errors are always at the end.
         """
         if len(text) <= max_chars:
             return text
-        half = max_chars // 2
+        if tail_heavy:
+            head_size = max_chars // 5       # 20% head
+            tail_size = max_chars - head_size # 80% tail
+        else:
+            head_size = max_chars // 2
+            tail_size = max_chars // 2
         return (
-            text[:half]
+            text[:head_size]
             + f"\n\n... [TRUNCATED {len(text) - max_chars:,} chars] ...\n\n"
-            + text[-half:]
+            + text[-tail_size:]
         )
 
     def __init__(self, project_path: str, log_file: Optional[str] = None):
@@ -110,7 +119,8 @@ class TerminalBridge:
                 new_content = f.read()
                 self._last_read_pos = f.tell()
             cleaned = self._strip_ansi(new_content)
-            return self._truncate_output(cleaned)
+            # Keep 80% tail where errors live
+            return self._truncate_output(cleaned, tail_heavy=True)
         except (PermissionError, OSError):
             return ""
 

@@ -202,8 +202,13 @@ declare BUILD_UNFIXABLE_PROJECT_CHANGES_REQUIRED."""
         elif user_input == "fail":
             self._handle_fail()
 
+        elif user_input == "continue":
+            # "continue" means: read any pending files and continue the agent flow
+            self._continue_pending_reads()
+
         else:
             self._send_user_message(raw_input.strip())
+            self._step_count += 1  # Increment on user messages too
 
     def _scan_and_continue(self):
         """Read new logs from Terminal A, denoise, and feed to agent."""
@@ -222,9 +227,9 @@ declare BUILD_UNFIXABLE_PROJECT_CHANGES_REQUIRED."""
         line_count = len(new_logs.splitlines())
         progress_done(f"{line_count} lines")
 
-        # Only denoise if output is large (>100 lines). Short outputs are
-        # passed through raw — every line matters when output is small.
-        if line_count > 100:
+        # Only denoise if output is very large (>500 lines). The denoiser
+        # is too aggressive — for most builds, raw logs are better.
+        if line_count > 500:
             tool_use("Denoise", f"{line_count} raw lines")
             progress_spinner("Denoising logs")
             denoised = self.gemini.denoise_logs(new_logs)
@@ -245,21 +250,18 @@ declare BUILD_UNFIXABLE_PROJECT_CHANGES_REQUIRED."""
         context_block = self._memory.get_context_block()
         prompt = f"""{context_block}
 
-Here are the latest denoised build logs from Terminal A (step {self._step_count}):
+Here are the latest build logs from Terminal A (step {self._step_count}):
 
 ```
 {denoised}
 ```
 
-Analyze these logs and tell me:
-1. What happened (success/failure)?
-2. If this is the first build run, compare these errors with the historical logs — do they match?
-3. What is the root cause if it failed?
-4. What should I do next?
+These are ALL the logs available. Do NOT ask for more logs. Do NOT ask the user to provide, paste, or show anything. Diagnose from what you have above.
 
-If the build SUCCEEDED, provide the final SUMMARY block and VERDICT: BUILD_FIXED.
-If suggesting a fix, explain what you're fixing and why.
-If you've reached a conclusion that this is unfixable, provide the SUMMARY block and appropriate VERDICT."""
+If the error is visible: identify the root cause and suggest ONE fix command.
+If the build SUCCEEDED: output VERDICT: BUILD_FIXED
+If unfixable: output VERDICT: BUILD_UNFIXABLE_PROJECT_CHANGES_REQUIRED
+If you need to read a project file, use READ_FILE: <path> — never ask the user to cat it."""
 
         response = self.gemini.chat_main(prompt)
         progress_done()
@@ -337,6 +339,17 @@ SUMMARY block and declare the appropriate VERDICT."""
 
         self._handle_agent_response(response)
         self._step_count += 1
+
+    def _continue_pending_reads(self):
+        """Handle 'continue' command — tell agent to proceed, which triggers file reads."""
+        thinking_start("continuing")
+        progress_spinner("Agent continuing")
+        response = self.gemini.chat_main(
+            "Continue. Read any files you need using READ_FILE: and then provide your fix."
+        )
+        progress_done()
+        agent_msg(response)
+        self._handle_agent_response(response)
 
     def _send_user_message(self, message: str):
         """Send a free-text message from the user to the agent."""
@@ -443,25 +456,42 @@ User message: {message}"""
                     if action.action_type == ActionType.EDIT_FILE:
                         self._apply_edit(action.content, action.metadata.get("new_content", ""))
 
-                # If agent wants MORE files, just tell the user
-                more_files = [a.content for a in new_actions if a.action_type == ActionType.READ_FILE]
-                if more_files:
-                    for f in more_files:
-                        if f not in self._files_read:
-                            info(f"Agent also wants: {f} (will read on next turn — press Enter)")
+                # If agent wants MORE files, read them automatically (one extra round max)
+                more_reads = [a.content for a in new_actions
+                              if a.action_type == ActionType.READ_FILE and a.content not in self._files_read]
+                if more_reads and len(more_reads) <= self.MAX_AUTO_READS_PER_TURN and len(file_reads) + len(more_reads) <= self.MAX_AUTO_READS_PER_TURN * 2:
+                    extra_contents = self._batch_read_files(more_reads)
+                    if extra_contents:
+                        combined2 = "\n\n".join(extra_contents)
+                        progress_spinner("Agent analyzing additional files")
+                        final_resp = self.gemini.chat_main(
+                            f"Here are the additional files:\n\n{combined2}\n\n"
+                            "Now provide your fix. Do NOT request more files."
+                        )
+                        progress_done()
+                        agent_msg(final_resp)
+                        # Extract commands/edits from final response
+                        final_actions = ActionParser.parse(final_resp)
+                        for fa in final_actions:
+                            if fa.action_type == ActionType.VERDICT:
+                                self._handle_verdict(fa.content, fa.metadata.get("reason", ""), final_resp)
+                                return
+                            elif fa.action_type == ActionType.EDIT_FILE:
+                                self._apply_edit(fa.content, fa.metadata.get("new_content", ""))
+                        final_cmds = [a.content for a in final_actions if a.action_type == ActionType.COMMAND]
+                        self._display_commands(final_cmds)
 
-                # STOP HERE — return control to user
                 self._trim_if_needed()
                 return
+
+        # ── Apply ALL edit/write requests from the response ──
+        edits = [a for a in actions if a.action_type == ActionType.EDIT_FILE]
+        for action in edits:
+            self._apply_edit(action.content, action.metadata.get("new_content", ""))
 
         # ── Display commands from original response ──
         commands = [a.content for a in actions if a.action_type == ActionType.COMMAND]
         self._display_commands(commands)
-
-        # ── Handle edit requests ──
-        for action in actions:
-            if action.action_type == ActionType.EDIT_FILE:
-                self._apply_edit(action.content, action.metadata.get("new_content", ""))
 
         # Trim history if it's getting long
         self._trim_if_needed()
@@ -558,6 +588,8 @@ User message: {message}"""
         ok = self.bridge.write_project_file(filepath, new_content)
         if ok:
             success(f"File written: {filepath}")
+            # Clear from read cache so agent can re-read the modified file
+            self._files_read.discard(filepath)
             self.session.files_changed.append({
                 "file": filepath,
                 "change": new_content[:100] + "..." if len(new_content) > 100 else new_content,

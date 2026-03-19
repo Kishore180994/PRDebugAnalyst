@@ -35,7 +35,8 @@ class ActionParser:
     COMMAND_PATTERN = re.compile(r"```(?:bash|shell|sh)?\s*\n(.*?)\n```", re.DOTALL)
     READ_FILE_PATTERN = re.compile(r"READ_FILE:\s*(.+?)(?:\n|$)")
     # EDIT_FILE and WRITE_FILE are aliases — both write content to a file
-    EDIT_FILE_PATTERN = re.compile(r"(?:EDIT_FILE|WRITE_FILE):\s*(.+?)\s*\n```\s*\n?(.*?)\n```", re.DOTALL)
+    # The [\w.-]* after ``` skips language tags (kotlin, toml, gradle-kotlin, etc.)
+    EDIT_FILE_PATTERN = re.compile(r"(?:EDIT_FILE|WRITE_FILE):\s*(.+?)\s*\n```[\w.-]*\s*\n(.*?)\n```", re.DOTALL)
     VERDICT_PATTERN = re.compile(r"VERDICT:\s*(\S+)")
     REASON_PATTERN = re.compile(r"REASON:\s*(.+?)(?:\n\n|\n(?:VERDICT|READ_FILE|EDIT_FILE|WRITE_FILE|```)|$)", re.DOTALL)
 

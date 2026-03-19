@@ -534,12 +534,17 @@ or a final VERDICT with SUMMARY block."""
             # Reject NEEDS_MORE_INVESTIGATION — keep running until a definitive verdict
             if verdict == "NEEDS_MORE_INVESTIGATION" and self._iteration < self.HARD_LIMIT:
                 info("Agent wants more investigation — continuing automatically...")
-                self.gemini.chat_main(
+                retry_response = self.gemini.chat_main(
                     "NEEDS_MORE_INVESTIGATION is not a final verdict. Keep debugging. "
                     "Try a different approach, read different files, or run different commands. "
                     "You must reach BUILD_FIXED or BUILD_UNFIXABLE_*."
                 )
-                return  # Don't set verdict — let the loop continue
+                # Process the retry response so it's not wasted
+                agent_msg(retry_response)
+                retry_result = ActionParser.extract_verdict(retry_response)
+                if retry_result and retry_result[0] != "NEEDS_MORE_INVESTIGATION":
+                    self._verdict = retry_result
+                return  # Let the loop continue if no definitive verdict
 
             self._verdict = result
 

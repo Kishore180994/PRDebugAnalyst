@@ -335,14 +335,14 @@ If build succeeded with no issues, respond with "NO_BUILD_ISSUES_DETECTED".
             progress_done("compressed")
         except Exception as e:
             warning(f"LLM compaction failed ({e}), naive trim")
-            first = self._main_history[0]
-            self._main_history = [first] + self._main_history[-keep_last_n:]
+            if self._main_history:
+                self._main_history = [self._main_history[0]] + self._main_history[-min(keep_last_n, len(self._main_history) - 1):]
             return
 
         if not compressed.strip():
             warning("Compaction empty, naive trim")
-            first = self._main_history[0]
-            self._main_history = [first] + self._main_history[-keep_last_n:]
+            if self._main_history:
+                self._main_history = [self._main_history[0]] + self._main_history[-min(keep_last_n, len(self._main_history) - 1):]
             return
 
         # Build session memory block
@@ -504,6 +504,8 @@ DECLARE a verdict when done:
 4. Use READ_FILE: to read files. NEVER suggest cat/ls/grep/find to the user.
 5. ONE fix per turn. Suggest it, let user rebuild, then assess next error.
 6. If a fix fails, TRY A DIFFERENT APPROACH. Do not repeat the same fix.
+7. NEVER pipe build commands through tail/head/grep. Run commands PLAIN: `./gradlew assembleDebug --stacktrace` — NOT `./gradlew assembleDebug | tail -n 100`. The terminal recording captures everything.
+8. When using WRITE_FILE, use plain ``` blocks — NOT ```kotlin or ```toml. Just ``` followed by content.
 7. If build shows "BUILD SUCCESSFUL" → VERDICT: BUILD_FIXED
 8. When unfixable → VERDICT: BUILD_UNFIXABLE_PROJECT_CHANGES_REQUIRED
 

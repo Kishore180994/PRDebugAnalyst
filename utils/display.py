@@ -161,22 +161,33 @@ def agent_msg(msg: str, title: str = "[bold blue]🔧 AI Guide[/bold blue]",
 
     console.print(Panel(Markdown(msg), title=title, border_style=border_style))
 
-    # Extract code blocks and print as copyable commands below the panel
+    # Extract ONLY bash/shell code blocks as copyable commands.
+    # Skip WRITE_FILE content blocks (kotlin, toml, groovy, etc.)
     fence = "`" * 3
-    code_blocks = re.findall(rf"{fence}(?:\w*)\n(.*?){fence}", msg, re.DOTALL)
-    if code_blocks:
+    bash_blocks = re.findall(rf"{fence}(?:bash|shell|sh)\s*\n(.*?){fence}", msg, re.DOTALL)
+    # Also include plain ``` blocks that look like commands (short, start with ./ or export)
+    plain_blocks = re.findall(rf"{fence}\s*\n(.*?){fence}", msg, re.DOTALL)
+    for pb in plain_blocks:
+        stripped = pb.strip()
+        if stripped and len(stripped.splitlines()) <= 3 and any(
+            stripped.startswith(p) for p in ["./", "export ", "cd ", "git ", "sudo ", "chmod ", "sed ", "echo "]
+        ):
+            if stripped not in [b.strip() for b in bash_blocks]:
+                bash_blocks.append(pb)
+
+    if bash_blocks:
         console.print()
         console.print("[bold yellow]📋 Copyable commands (select below):[/bold yellow]")
         console.print("[dim]─" * 60 + "[/dim]")
-        for i, block in enumerate(code_blocks, 1):
-            if len(code_blocks) > 1:
+        for i, block in enumerate(bash_blocks, 1):
+            if len(bash_blocks) > 1:
                 console.print(f"[dim]── block {i} ──[/dim]")
             console.print(block.strip())
             console.print("[dim]─" * 60 + "[/dim]")
 
-        # Auto-copy: if there's exactly one code block, copy it to clipboard
-        if len(code_blocks) == 1:
-            cmd_text = code_blocks[0].strip()
+        # Auto-copy: if there's exactly one bash block, copy it
+        if len(bash_blocks) == 1:
+            cmd_text = bash_blocks[0].strip()
             if _copy_to_clipboard(cmd_text):
                 console.print(f"  [green]✔[/green] [dim]Copied to clipboard[/dim]")
 
