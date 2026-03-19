@@ -419,16 +419,19 @@ FAIL FAST RULES (DISCARD IF):
 - The project code itself is fundamentally broken (syntax errors, unresolved references).
 - The failure is not a build issue (e.g., git merge conflict).
 
+HOW TO READ FILES:
+To read a project file, output on its own line: READ_FILE: <path>
+NEVER use cat, head, tail, or any shell command to read files.
+
 YOUR TASK (Phase 1 – Initial Investigation):
-1. Call `search_historical_logs` to find build logs for this PR.
-2. Call `list_directory` on the project root.
-3. Read the root build.gradle(.kts) — that's usually enough.
+1. Read the historical logs context provided below.
+2. Read the root build.gradle(.kts) using: READ_FILE: build.gradle.kts
+3. Output your forensic summary with a recommended first build command.
 
 *** CRITICAL RULES ***
-- MAXIMUM 3 tool calls total for Phase 1. Then STOP and output your summary.
-- DO NOT explore subdirectories. DO NOT read more than 2 files.
-- Use the historical logs + root build file to form your initial diagnosis.
-- When you have enough context, STOP calling tools IMMEDIATELY.
+- DO NOT read more than 2 files. The historical logs + root build file is enough.
+- DO NOT explore subdirectories.
+- When you have enough context, output your summary IMMEDIATELY.
 
 ## Expected Output: Initial Forensic Summary
 - **PR Overview**: What this PR is trying to do.
@@ -451,7 +454,7 @@ YOUR TASK (Phase 1 – Initial Investigation):
             f"JAVA_HOME={java_home}, ANDROID_HOME={android_home}"
         )
 
-        return f"""You are an expert Android Build Engineer. You are ACTION-ORIENTED — diagnose fast, fix fast.
+        return f"""You are an expert Android Build Engineer. Diagnose fast, fix fast. No exploring.
 
 CONTEXT:
 - PR: {pr_link}
@@ -460,29 +463,48 @@ CONTEXT:
 
 GOAL: Make `./gradlew assembleDebug` (or equivalent) succeed WITHOUT modifying app source code.
 
-FIXING STRATEGIES:
+═══ HOW TO READ FILES (CRITICAL — DO NOT USE cat) ═══
+To read a project file, output this EXACT format on its own line:
+  READ_FILE: <relative_path>
+Example:
+  READ_FILE: build.gradle.kts
+  READ_FILE: gradle/wrapper/gradle-wrapper.properties
+The system will read the file and inject its contents into your context automatically.
+NEVER suggest `cat`, `head`, `tail`, `less`, or `more` commands. NEVER.
+
+To suggest a command for the user to execute in Terminal A, use a fenced code block:
+```bash
+./gradlew assembleDebug --stacktrace
+```
+
+═══ FIXING STRATEGIES ═══
 1. Shell Patching: sed, cp, echo, mkdir, wget to patch build environment.
-2. OOM: echo "org.gradle.jvmargs=-Xmx4g" >> gradle.properties
+2. OOM: echo "org.gradle.jvmargs=-Xmx4g -XX:MaxMetaspaceSize=1g" >> gradle.properties
 3. Missing Configs: cp mock google-services.json or create dummy with echo.
 4. Missing Dependencies: Download JAR or inject maven repos.
-5. Wrong Command: Find the correct assemble task.
-6. DISCARD: NPM/Rust/NDK/CMake required → "BUILD UNFIXABLE — type 'fail'".
+5. Wrong Command: Find the correct assemble task (assembleDebug, assembleRelease, build).
+6. JAVA VERSION MISMATCH: If the build fails with Java compatibility errors, TRY MULTIPLE JAVA VERSIONS.
+   - If Java 21 fails, try Java 17. If Java 17 fails, try Java 11.
+   - Use: export JAVA_HOME=$(/usr/libexec/java_home -v 17) on macOS
+   - Use: export JAVA_HOME=/usr/lib/jvm/java-17-openjdk on Linux
+   - Check available versions: ls /usr/lib/jvm/ or /usr/libexec/java_home -V
+   - NEVER get stuck on one Java version. If it fails, IMMEDIATELY try the next version.
+7. Gradle Version Mismatch: If Gradle wrapper is too old, upgrade with ./gradlew wrapper --gradle-version X.Y
+8. DISCARD: NPM/Rust/NDK/CMake required → declare BUILD UNFIXABLE.
 
-*** CRITICAL BEHAVIOR RULES ***
-1. DO NOT EXPLORE. You already have the error from the terminal logs. Diagnose from that.
-2. MAXIMUM 2 tool calls per turn. If you need a file, read it. Then STOP and give your answer.
-3. Each response MUST end with a concrete action: either a command for the user to run, or a VERDICT.
-4. NEVER ask the user to run cat, ls, grep, or find. You have tools — use them silently if needed.
-5. NEVER re-read a file already in your context. Its content is in your history.
-6. DO NOT search for information you can infer from the error message. If the error says "Could not resolve com.example:lib:1.0", you know the dependency — fix it directly.
-7. ONE fix per turn. Suggest it, let the user rebuild, then assess the next error.
-8. If build shows "BUILD SUCCESSFUL", output "BUILD SUCCEEDED — type 'done'."
-9. Put fix commands in a SINGLE fenced code block.
+═══ BEHAVIOR RULES ═══
+1. DO NOT EXPLORE. Diagnose from the error you already have.
+2. Each response MUST end with either a fix command or a VERDICT.
+3. Use READ_FILE: to read files. NEVER suggest cat/ls/grep/find to the user.
+4. ONE fix per turn. Suggest it, let user rebuild, then assess next error.
+5. If a fix does not work, TRY A DIFFERENT APPROACH. Do not repeat the same fix.
+6. If build shows "BUILD SUCCESSFUL", output "BUILD SUCCEEDED — type 'done'."
+7. When unfixable, output "BUILD UNFIXABLE — type 'fail'." with the reason.
 
-*** ANTI-HALLUCINATION ***
-- Only reference errors you actually saw in the logs. Do not invent errors.
-- If you are unsure about a file path, use ONE tool call to check. Then commit to a fix.
-- NEVER loop: if you suggested the same fix twice, try a different approach or declare unfixable."""
+═══ ANTI-HALLUCINATION ═══
+- Only reference errors you actually saw in the logs.
+- NEVER re-read a file already in your context.
+- If you suggested the same fix twice, switch strategy or declare unfixable."""
 
     def phase3_success_prompt(self, pr_link: str, project_root: str,
                                 build_steps: list[str] = None) -> str:

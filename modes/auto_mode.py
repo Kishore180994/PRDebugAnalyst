@@ -112,7 +112,13 @@ class AutoMode:
                 interrupted_msg()
                 action = self._pause_for_user()
                 if action == "quit":
-                    self._verdict = ("INTERRUPTED", "User chose to end the session.")
+                    self._verdict = ("INTERRUPTED", "User quit the session.")
+                    break
+                elif action == "done":
+                    self._verdict = ("BUILD_FIXED", "User confirmed build succeeded.")
+                    break
+                elif action == "fail":
+                    self._verdict = ("BUILD_UNFIXABLE_PROJECT_CHANGES_REQUIRED", "User declared build unfixable.")
                     break
                 elif action == "continue":
                     continue  # resume auto loop
@@ -540,20 +546,23 @@ or a final VERDICT with SUMMARY block."""
     def _pause_for_user(self) -> str:
         """
         Called when Ctrl+C is pressed in auto mode.
-        Gives the user a choice: continue, skip current step, or quit.
-        Returns: 'continue', 'skip', or 'quit'.
+        Gives the user a choice with proper session conclusion for each option.
+        Returns: 'continue', 'skip', 'done', 'fail', or 'quit'.
         """
-        info("Auto mode paused. What would you like to do?")
+        console_print = lambda msg: __import__('rich').print(msg)
+
+        section("Session Paused")
         info("  [c] Continue — resume auto mode")
-        info("  [s] Skip — skip this step, move to next")
-        info("  [q] Quit — end the session")
+        info("  [s] Skip    — skip this step, move to next")
+        info("  [d] Done    — BUILD SUCCEEDED → generate fix script")
+        info("  [f] Fail    — BUILD UNFIXABLE → generate failure report")
+        info("  [q] Quit    — exit immediately (no report)")
         print()
 
         while True:
             try:
-                choice = user_prompt("Action (c/s/q): ").strip().lower()
+                choice = user_prompt("Action (c/s/d/f/q): ").strip().lower()
             except KeyboardInterrupt:
-                # Double Ctrl+C = quit
                 print()
                 return "quit"
 
@@ -563,10 +572,16 @@ or a final VERDICT with SUMMARY block."""
             elif choice in ("s", "skip"):
                 info("Skipping current step...")
                 return "skip"
+            elif choice in ("d", "done"):
+                info("Marking build as SUCCEEDED...")
+                return "done"
+            elif choice in ("f", "fail"):
+                info("Marking build as UNFIXABLE...")
+                return "fail"
             elif choice in ("q", "quit"):
                 return "quit"
             else:
-                warning("Please enter c, s, or q.")
+                warning("Please enter c, s, d, f, or q.")
 
     def _get_last_agent_response(self) -> str:
         """Get the last agent (model) response from history."""
