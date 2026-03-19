@@ -179,39 +179,25 @@ class GeminiClient:
         """
         Use the fast denoiser model (Gemini 2.5 Flash) to clean build logs.
         This is a stateless call - no history maintained.
-        Returns cleaned, relevant-only log content.
+        Strips noise but PRESERVES all actual log lines verbatim — no summarizing.
         Falls back to raw logs if all retries fail.
         """
-        prompt = f"""You are a build log denoiser for Android projects.
-Your job is to take raw build/terminal output and extract ONLY the relevant information.
+        prompt = f"""You are a log denoising agent. You are given raw output from a terminal session where an Android build is being debugged.
 
-KEEP:
-- Error messages and stack traces
-- Warning messages related to the build failure
-- Gradle task names that failed
-- File paths mentioned in errors
-- Dependency resolution errors
-- Configuration errors
-- Any "BUILD FAILED" or similar status lines
-- Compiler errors with line numbers
+Your job is to produce a "Clean View" of the logs for a senior engineer.
 
-REMOVE:
-- Download progress bars and percentages
-- Successful task completions (unless they provide context for a failure)
-- Verbose debug logging that isn't related to errors
-- Repeated identical log lines (keep just one instance)
-- ASCII art, banners, and decorative output
-- Timestamp prefixes (keep the message content)
-- Gradle daemon startup messages
-- Memory/GC statistics (unless related to OOM errors)
+RULES:
+1. REMOVE all ANSI escape codes, progress bars (e.g., [===>   ]), and repetitive status updates.
+2. REMOVE redundant or irrelevant system noise (e.g., shell environment prints that don't fail).
+3. PRESERVE all actual error messages, warnings, build failures, and the 'What went wrong' section.
+4. SUMMARIZE long Java stack traces by keeping the first 5 and last 2 relevant frames.
+5. KEEP the exact text of the relevant lines — do NOT paraphrase or summarize errors.
+6. DO NOT add commentary, explanations, or analysis. Just output the cleaned log lines.
 
-Output the denoised log content directly, no commentary. If the logs contain no errors,
-output "NO_ERRORS_FOUND" followed by a brief summary of what the logs show.
+If the logs are purely successful with no issues, respond with "NO_BUILD_ISSUES_DETECTED".
 
-RAW LOGS:
-```
-{raw_logs}
-```"""
+--- RAW TERMINAL LOGS ---
+{raw_logs}"""
 
         def _do_call():
             response = self.client.models.generate_content(
