@@ -185,8 +185,7 @@ declare BUILD_UNFIXABLE_PROJECT_CHANGES_REQUIRED."""
 
     def _interaction_loop(self):
         """Single iteration of the manual mode interaction loop."""
-        step_prompt(self._step_count)
-        raw_input = user_prompt()
+        raw_input = step_prompt(self._step_count)
         user_input = raw_input.strip().lower()
 
         if user_input == "quit":
@@ -515,10 +514,11 @@ User message: {message}"""
         return results
 
     def _trim_if_needed(self):
-        """Trim conversation history if it's getting long."""
-        if self.gemini.get_history_length() > 20:
-            self.gemini.trim_history(keep_last_n=14)
-            info("(Trimmed conversation history to save context window)")
+        """Compact conversation history if it's getting long, preserving session memory."""
+        self.gemini.trim_history(
+            keep_last_n=14,
+            session_memory=self._memory if hasattr(self, '_memory') else None,
+        )
 
     def _handle_verdict(self, verdict: str, reason: str, full_response: str):
         """Handle a verdict from the agent — display and finalize session."""

@@ -365,9 +365,10 @@ Analyze the output:
 
         self._check_verdict(response)
 
-        if self.gemini.get_history_length() > 20:
-            self.gemini.trim_history(keep_last_n=14)
-            diminfo("(Trimmed conversation history to save context window)")
+        self.gemini.trim_history(
+            keep_last_n=14,
+            session_memory=self._memory if hasattr(self, '_memory') else None,
+        )
 
     def _read_and_report(self, filepath: str):
         """Read a file and report its contents to the agent."""

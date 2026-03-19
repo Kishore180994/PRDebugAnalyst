@@ -174,6 +174,12 @@ def agent_msg(msg: str, title: str = "[bold blue]🔧 AI Guide[/bold blue]",
             console.print(block.strip())
             console.print("[dim]─" * 60 + "[/dim]")
 
+        # Auto-copy: if there's exactly one code block, copy it to clipboard
+        if len(code_blocks) == 1:
+            cmd_text = code_blocks[0].strip()
+            if _copy_to_clipboard(cmd_text):
+                console.print(f"  [green]✔[/green] [dim]Copied to clipboard[/dim]")
+
     emitter.emit(EventType.AGENT_MESSAGE, content=msg)
 
 
@@ -310,16 +316,15 @@ def manual_mode_help():
 #  Step / Action Prompt — Like PRFAgent's Phase 2 prompt
 # ═══════════════════════════════════════════════════════════════════════════
 
-def step_prompt(step_num: int):
-    """Display the step indicator before user input."""
+def step_prompt(step_num: int) -> str:
+    """
+    Display the step indicator and action prompt.
+    Returns the user's input. Matches PRFAgent's Phase 2 prompt style.
+    """
     console.print()
     emitter.emit(EventType.STEP, step_num=step_num)
-
-
-def action_prompt() -> str:
-    """The main Phase 2 action prompt — matches PRFAgent's style."""
     return Prompt.ask(
-        "\n[bold green]▶ Action[/bold green] (Enter=check logs, 'done'=success, 'fail'=give up)",
+        f"[bold green]▶ Step {step_num}[/bold green] (Enter=check logs, 'done'=success, 'fail'=give up)",
         console=console,
     )
 

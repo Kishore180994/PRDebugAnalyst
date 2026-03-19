@@ -15,8 +15,12 @@ import os
 import sys
 import time
 import json
+import logging
 import threading
 from pathlib import Path
+
+# Suppress Flask/Werkzeug dev server warnings from cluttering the terminal
+logging.getLogger('werkzeug').setLevel(logging.ERROR)
 
 from flask import Flask, render_template_string, send_from_directory
 from flask_socketio import SocketIO, emit
@@ -143,13 +147,13 @@ def _watch_log_file():
 #  Server Lifecycle
 # ═══════════════════════════════════════════════════════════════════════════
 
-def start_server(port: int = 5000, log_file: str = "", pr_link: str = "", mode: str = "manual"):
+def start_server(port: int = 8420, log_file: str = "", pr_link: str = "", mode: str = "manual"):
     """
     Start the web dashboard server in a background thread.
     Returns the URL where the dashboard is accessible.
 
     Args:
-        port: Port to serve on (default 5000)
+        port: Port to serve on (default 8420 — avoids macOS AirPlay on 5000)
         log_file: Path to the script log file for terminal streaming
         pr_link: PR link being debugged
         mode: "manual" or "auto"
@@ -172,14 +176,56 @@ def start_server(port: int = 5000, log_file: str = "", pr_link: str = "", mode: 
     watcher_thread = threading.Thread(target=_watch_log_file, daemon=True)
     watcher_thread.start()
 
+    # Check if port is available before starting
+    import socket
+    actual_port = port
+    for try_port in [port, port + 1, port + 2, port + 10]:
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.bind(('127.0.0.1', try_port))
+            sock.close()
+            actual_port = try_port
+            break
+        except OSError:
+            continue
+
     # Start Flask-SocketIO in a background thread
-    server_thread = threading.Thread(
-        target=lambda: socketio.run(app, host='127.0.0.1', port=port, debug=False, use_reloader=False, log_output=False),
-        daemon=True,
-    )
+    # Use 0.0.0.0 so it's accessible from other machines too
+    _server_error = []
+
+    def _run_server():
+        try:
+            socketio.run(
+                app,
+                host='0.0.0.0',
+                port=actual_port,
+                debug=False,
+                use_reloader=False,
+                log_output=False,
+                allow_unsafe_werkzeug=True,
+            )
+        except Exception as e:
+            _server_error.append(str(e))
+
+    server_thread = threading.Thread(target=_run_server, daemon=True)
     server_thread.start()
 
-    url = f"http://127.0.0.1:{port}"
+    # Wait a moment for the server to start, then verify
+    time.sleep(1.0)
+
+    if _server_error:
+        raise RuntimeError(f"Web server failed: {_server_error[0]}")
+
+    # Verify the server is actually responding
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(2)
+        sock.connect(('127.0.0.1', actual_port))
+        sock.close()
+    except (ConnectionRefusedError, OSError):
+        raise RuntimeError(f"Web server started but not responding on port {actual_port}")
+
+    url = f"http://localhost:{actual_port}"
     return url
 
 

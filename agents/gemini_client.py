@@ -239,16 +239,141 @@ If the logs are purely successful with no issues, respond with "NO_BUILD_ISSUES_
         """Return number of turns in the main agent's history."""
         return len(self._main_history)
 
-    def trim_history(self, keep_last_n: int = 10):
+    # ── History Compaction (PRFAgent-style) ─────────────────────────────
+
+    # When total history text exceeds this, compact older turns.
+    HISTORY_COMPACT_THRESHOLD = 500_000  # ~125k tokens
+    HISTORY_KEEP_RECENT = 6  # last 3 user/model exchanges
+
+    def _estimate_history_chars(self) -> int:
+        """Estimate total character count in conversation history."""
+        total = 0
+        for item in self._main_history:
+            for p in item.parts:
+                if hasattr(p, 'text') and p.text:
+                    total += len(p.text)
+        return total
+
+    def trim_history(self, keep_last_n: int = 10, session_memory=None):
         """
-        Trim history to the last N turns to manage context window.
-        Always keeps the first message (initial context) and last N messages.
+        Smart history compaction with LLM summarization.
+
+        Instead of naively dropping old turns (losing step info needed for
+        the final fix script), this:
+        1. Separates file contents (preserved verbatim) from conversation
+        2. Uses the denoiser model to compress conversation into a briefing
+        3. Injects session memory as structured context
+        4. Keeps the last N turns verbatim
+
+        Falls back to naive trimming if LLM compaction fails.
         """
-        if len(self._main_history) <= keep_last_n + 1:
+        estimated = self._estimate_history_chars()
+        if estimated < self.HISTORY_COMPACT_THRESHOLD:
             return
-        first = self._main_history[0]
-        recent = self._main_history[-keep_last_n:]
-        self._main_history = [first] + recent
+
+        from utils.display import info, warning, progress_spinner, progress_done
+
+        info(f"History compaction ({estimated:,} chars > {self.HISTORY_COMPACT_THRESHOLD:,} threshold)")
+
+        keep_count = min(self.HISTORY_KEEP_RECENT, len(self._main_history))
+        old_items = self._main_history[:-keep_count] if keep_count else self._main_history[:]
+        recent_items = self._main_history[-keep_count:] if keep_count else []
+
+        if not old_items:
+            return
+
+        # Separate file data from conversation
+        file_data_parts = []
+        conversation_parts = []
+
+        for item in old_items:
+            role = item.role.upper() if hasattr(item, 'role') else "UNKNOWN"
+            for p in item.parts:
+                if hasattr(p, 'text') and p.text:
+                    text = p.text
+                    if text.startswith("--- FILE:") or "Here is the content of" in text[:100]:
+                        if len(text) > 10_000:
+                            text = text[:5000] + "\n...[TRUNCATED]...\n" + text[-5000:]
+                        file_data_parts.append(text)
+                    else:
+                        snippet = text[:2000] + ("…" if len(text) > 2000 else "")
+                        conversation_parts.append(f"[{role}] {snippet}")
+
+        conversation_digest = "\n".join(conversation_parts)
+        if len(conversation_digest) > 60_000:
+            conversation_digest = conversation_digest[:30_000] + "\n...[MIDDLE TRUNCATED]...\n" + conversation_digest[-30_000:]
+
+        # Compress conversation via LLM
+        summary_prompt = (
+            "You are a context-compaction assistant. Below is the CONVERSATION portion "
+            "of an Android build debugging session. File contents are preserved separately.\n\n"
+            "Condense into a structured briefing preserving:\n"
+            "- Key errors and stack traces found\n"
+            "- Steps attempted and outcomes (INCLUDE EXACT COMMANDS)\n"
+            "- Current diagnosis / working hypothesis\n"
+            "- Files modified and what was changed\n"
+            "- What to do next\n\n"
+            "CRITICAL: Preserve ALL exact commands that were run, especially successful ones. "
+            "These are needed to generate the final fix script.\n\n"
+            "--- CONVERSATION LOG ---\n" + conversation_digest
+        )
+
+        try:
+            progress_spinner("Compressing conversation history")
+            summary_resp = self.client.models.generate_content(
+                model=self.config.denoiser_model,
+                contents=summary_prompt,
+                config=types.GenerateContentConfig(temperature=0.0, max_output_tokens=4096),
+            )
+            compressed = summary_resp.text or ""
+            progress_done("compressed")
+        except Exception as e:
+            warning(f"LLM compaction failed ({e}), naive trim")
+            first = self._main_history[0]
+            self._main_history = [first] + self._main_history[-keep_last_n:]
+            return
+
+        if not compressed.strip():
+            warning("Compaction empty, naive trim")
+            first = self._main_history[0]
+            self._main_history = [first] + self._main_history[-keep_last_n:]
+            return
+
+        # Build session memory block
+        memory_block = ""
+        if session_memory:
+            memory_block = "\n\n=== SECTION 3: SESSION MEMORY ===\n\n" + session_memory.get_context_block()
+
+        file_data_block = "\n\n".join(file_data_parts) if file_data_parts else "(no files read yet)"
+
+        self._main_history = [
+            types.Content(
+                role="user",
+                parts=[types.Part(text=(
+                    "[SYSTEM: History was compacted. Below are preserved sections.]\n\n"
+                    "=== SECTION 1: PRESERVED FILE CONTENTS ===\n"
+                    + file_data_block
+                    + "\n\n=== SECTION 2: SESSION SUMMARY ===\n\n"
+                    + compressed
+                    + memory_block
+                ))],
+            ),
+            types.Content(
+                role="model",
+                parts=[types.Part(text=(
+                    "Understood. I have file contents from Section 1, session summary "
+                    "from Section 2, and session memory from Section 3. I will NOT "
+                    "re-read files already listed. I will use the preserved commands "
+                    "and steps for the final fix script."
+                ))],
+            ),
+            *recent_items,
+        ]
+
+        new_estimated = self._estimate_history_chars()
+        info(f"Compacted: {estimated:,} → {new_estimated:,} chars "
+             f"({len(file_data_parts)} files preserved, {len(old_items)} items compressed, "
+             f"{len(recent_items)} recent kept)")
 
     # ── Helpers ─────────────────────────────────────────────────────────
 

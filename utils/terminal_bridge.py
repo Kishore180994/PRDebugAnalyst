@@ -14,6 +14,10 @@ import platform
 from pathlib import Path
 from typing import Optional
 
+# Max characters to keep per tool response in history (prevents context blowup).
+# ~30k chars ≈ ~7.5k tokens — keeps responses manageable in the conversation.
+MAX_TOOL_RESPONSE_CHARS = 30_000
+
 
 class TerminalBridge:
     """
@@ -27,6 +31,21 @@ class TerminalBridge:
         - Executes commands directly via subprocess
         - Captures output in real-time
     """
+
+    @staticmethod
+    def _truncate_output(text: str, max_chars: int = MAX_TOOL_RESPONSE_CHARS) -> str:
+        """
+        Truncate tool output to prevent context window blowup.
+        Keeps head + tail so the agent sees the beginning and end of output.
+        """
+        if len(text) <= max_chars:
+            return text
+        half = max_chars // 2
+        return (
+            text[:half]
+            + f"\n\n... [TRUNCATED {len(text) - max_chars:,} chars] ...\n\n"
+            + text[-half:]
+        )
 
     def __init__(self, project_path: str, log_file: Optional[str] = None):
         self.project_path = project_path
@@ -88,7 +107,9 @@ class TerminalBridge:
                 f.seek(self._last_read_pos)
                 new_content = f.read()
                 self._last_read_pos = f.tell()
-            return self._strip_ansi(new_content)
+            cleaned = self._strip_ansi(new_content)
+            # Cap terminal log size to prevent context blowup
+            return self._truncate_output(cleaned)
         except (PermissionError, OSError):
             return ""
 
@@ -138,7 +159,7 @@ class TerminalBridge:
     def execute_command(self, command: str, timeout: int = 600) -> tuple[int, str]:
         """
         Execute a command in the project directory and capture output.
-        Returns (return_code, output).
+        Returns (return_code, truncated_output).
         Used in auto mode.
         """
         try:
@@ -154,7 +175,7 @@ class TerminalBridge:
             output = result.stdout
             if result.stderr:
                 output += "\n--- STDERR ---\n" + result.stderr
-            return result.returncode, output
+            return result.returncode, self._truncate_output(output)
 
         except subprocess.TimeoutExpired:
             return -1, f"[Command timed out after {timeout}s]: {command}"
@@ -196,9 +217,9 @@ class TerminalBridge:
                 except subprocess.TimeoutExpired:
                     process.kill()
                     process.wait()  # Wait for kill to complete, prevent zombies
-                    return -1, "".join(output_lines) + f"\n[Timed out after {timeout}s]"
+                    return -1, self._truncate_output("".join(output_lines) + f"\n[Timed out after {timeout}s]")
 
-            return process.returncode, "".join(output_lines)
+            return process.returncode, self._truncate_output("".join(output_lines))
 
         except Exception as e:
             if process and process.poll() is None:
@@ -248,7 +269,7 @@ class TerminalBridge:
                 f"--- FILE: {path} ---\n"
                 f"--- SHOWING LINES {start_line} TO {min(end_idx, total)} OF {total} ---\n"
             )
-            return header + "".join(segment)
+            return self._truncate_output(header + "".join(segment))
         except (FileNotFoundError, PermissionError, OSError) as e:
             return f"Error: {e}"
 
@@ -305,7 +326,8 @@ class TerminalBridge:
         try:
             import subprocess as sp
 
-            cmd = ["grep", "-rn"]
+            # -m limits grep to max matches PER FILE, preventing runaway output
+            cmd = ["grep", "-rn", f"-m{max_results}"]
 
             # Exclude heavy directories (build artifacts, caches, .git objects)
             for d in self.EXCLUDE_DIRS:
@@ -346,7 +368,7 @@ class TerminalBridge:
             if len(lines) > max_results:
                 result_text += f"\n\n... [{len(lines) - max_results} more matches truncated]"
 
-            return f"--- GREP: '{pattern}' in {path} ({len(output_lines)} matches) ---\n{result_text}"
+            return self._truncate_output(f"--- GREP: '{pattern}' in {path} ({len(output_lines)} matches) ---\n{result_text}")
 
         except sp.TimeoutExpired:
             return f"Error: Search timed out for pattern '{pattern}'"
@@ -483,7 +505,7 @@ class TerminalBridge:
                 output += "\n--- STDERR ---\n" + result.stderr
 
             status = "SUCCESS" if result.returncode == 0 else f"FAILED (exit code {result.returncode})"
-            return f"--- COMMAND: {command} ---\n--- STATUS: {status} ---\n{output}"
+            return self._truncate_output(f"--- COMMAND: {command} ---\n--- STATUS: {status} ---\n{output}")
 
         except sp.TimeoutExpired:
             return f"TIMEOUT: Command timed out after {timeout}s: {command}"

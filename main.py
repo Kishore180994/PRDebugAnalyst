@@ -255,7 +255,7 @@ def main():
     import argparse
     parser = argparse.ArgumentParser(description="PR Debug Analyst — AI-powered Android build debugger")
     parser.add_argument("--web", action="store_true", help="Launch live web dashboard alongside the terminal UI")
-    parser.add_argument("--port", type=int, default=5000, help="Port for web dashboard (default: 5000)")
+    parser.add_argument("--port", type=int, default=8420, help="Port for web dashboard (default: 8420)")
     args = parser.parse_args()
 
     banner()
@@ -309,7 +309,14 @@ def main():
                 mode=mode,
             )
             success(f"Web dashboard: {web_url}")
-            info("Open in your browser for the live two-panel view")
+
+            # Auto-open in browser
+            import webbrowser
+            try:
+                webbrowser.open(web_url)
+                info("Dashboard opened in browser")
+            except Exception:
+                info(f"Open in your browser: {web_url}")
         except ImportError as e:
             warning(f"Could not start web dashboard: {e}")
             info("Install with: pip install flask flask-socketio --break-system-packages")
