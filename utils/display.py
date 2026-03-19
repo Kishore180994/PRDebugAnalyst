@@ -20,6 +20,7 @@ from typing import Optional
 
 from rich.console import Console
 from rich.markdown import Markdown
+from rich.markup import escape as _esc
 from rich.panel import Panel
 from rich.text import Text
 from rich.rule import Rule
@@ -108,7 +109,7 @@ def banner():
 def section(title: str):
     """Print a section/phase header as a full-width colored panel."""
     console.print(Panel(
-        f"[bold cyan]{title}[/bold cyan]",
+        f"[bold cyan]{_esc(title)}[/bold cyan]",
         border_style="cyan",
     ))
     emitter.emit(EventType.SECTION, title=title)
@@ -116,7 +117,7 @@ def section(title: str):
 
 def subsection(title: str):
     """Print a lighter subsection header."""
-    console.print(f"\n[bold]{title}[/bold]")
+    console.print(f"\n[bold]{_esc(title)}[/bold]")
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -124,24 +125,24 @@ def subsection(title: str):
 # ═══════════════════════════════════════════════════════════════════════════
 
 def success(msg: str):
-    console.print(f"  [green]✔ {msg}[/green]")
+    console.print(f"  [green]✔ {_esc(msg)}[/green]")
     emitter.emit(EventType.SUCCESS, message=msg)
 
 def error(msg: str):
-    console.print(f"  [bold red]✘ {msg}[/bold red]")
+    console.print(f"  [bold red]✘ {_esc(msg)}[/bold red]")
     emitter.emit(EventType.ERROR, message=msg)
 
 def warning(msg: str):
-    console.print(f"  [yellow]⚠ {msg}[/yellow]")
+    console.print(f"  [yellow]⚠ {_esc(msg)}[/yellow]")
     emitter.emit(EventType.WARNING, message=msg)
 
 def info(msg: str):
-    console.print(f"  [dim]{msg}[/dim]")
+    console.print(f"  [dim]{_esc(msg)}[/dim]")
     emitter.emit(EventType.INFO, message=msg)
 
 def diminfo(msg: str):
     """Even more subtle info line."""
-    console.print(f"  [dim]{msg}[/dim]")
+    console.print(f"  [dim]{_esc(msg)}[/dim]")
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -181,9 +182,9 @@ def agent_msg(msg: str, title: str = "[bold blue]🔧 AI Guide[/bold blue]",
 # ═══════════════════════════════════════════════════════════════════════════
 
 def user_prompt(prompt_text: str = "") -> str:
-    """Show a styled user input prompt."""
+    """Show a styled user input prompt. Escapes markup in prompt text."""
     if prompt_text:
-        return Prompt.ask(prompt_text, console=console)
+        return Prompt.ask(_esc(prompt_text), console=console)
     try:
         return input("  \033[1;34m❯\033[0m ")
     except EOFError:
@@ -219,7 +220,7 @@ def print_copyable_commands(commands: list[str]):
     """Print commands as plain green $ lines — easy to select and copy."""
     console.print()
     for cmd in commands:
-        console.print(f"  [bold green]$ {cmd}[/bold green]")
+        console.print(f"  [bold green]$ {_esc(cmd)}[/bold green]")
     console.print()
 
 
@@ -254,9 +255,9 @@ def verdict_display(verdict: str, reason: str):
     style = "green" if is_success else "red"
     icon = "✅" if is_success else "❌"
 
-    content = f"[bold {style}]{icon}  {verdict}[/bold {style}]"
+    content = f"[bold {style}]{icon}  {_esc(verdict)}[/bold {style}]"
     if reason:
-        content += f"\n\n{reason}"
+        content += f"\n\n{_esc(reason)}"
 
     console.print(Panel(content, border_style=style))
     emitter.emit(EventType.VERDICT, verdict=verdict, reason=reason)
@@ -280,14 +281,14 @@ def log_summary_table(log_summaries: list[dict]):
         errors = log.get("errors", [])
         failed_tasks = log.get("failed_tasks", [])
 
-        console.print(f"  [bold]{i}. {pr_id}[/bold]  [dim]{filename}[/dim]")
+        console.print(f"  [bold]{i}. {_esc(pr_id)}[/bold]  [dim]{_esc(filename)}[/dim]")
 
         if errors:
             for err in errors[:3]:
-                console.print(f"     [red]• {err['type']} ×{err['count']}[/red]")
+                console.print(f"     [red]• {_esc(err['type'])} ×{err['count']}[/red]")
         if failed_tasks:
             tasks_str = ", ".join(failed_tasks[:5])
-            console.print(f"     [yellow]failed: {tasks_str}[/yellow]")
+            console.print(f"     [yellow]failed: {_esc(tasks_str)}[/yellow]")
         console.print()
 
 
@@ -359,8 +360,7 @@ _spinner_context = None
 def progress_spinner(msg: str):
     """Start a spinner. Compatible API but uses console.status internally."""
     global _spinner_context
-    # We can't use context manager style, so just print a status line
-    console.print(f"  [dim]⏳ {msg}…[/dim]")
+    console.print(f"  [dim]⏳ {_esc(msg)}…[/dim]")
     emitter.emit(EventType.SPINNER_START, message=msg)
 
 def progress_done(label: str = "done"):
@@ -378,7 +378,7 @@ def interrupted_msg():
 
 def thinking_start(topic: str = ""):
     """Show thinking indicator."""
-    label = f" {topic}" if topic else ""
+    label = f" {_esc(topic)}" if topic else ""
     console.print(f"  [dim]🧠 thinking{label}…[/dim]")
     emitter.emit(EventType.THINKING_START, topic=topic)
 
@@ -389,7 +389,7 @@ def thinking_summary(text: str, max_lines: int = 3):
     """Show a collapsed thinking summary."""
     lines = text.strip().split("\n")[:max_lines]
     for line in lines:
-        console.print(f"  [dim]{line[:80]}[/dim]")
+        console.print(f"  [dim]{_esc(line[:80])}[/dim]")
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -399,19 +399,21 @@ def thinking_summary(text: str, max_lines: int = 3):
 def tool_use(tool_name: str, detail: str = "", count: int = 0, budget: int = 0):
     """Show a tool being invoked — PRFAgent style."""
     budget_str = f" [dim]({count}/{budget})[/dim]" if budget > 0 else ""
-    detail_str = f" [dim]{detail}[/dim]" if detail else ""
-    console.print(f"[bold yellow]⚡ TOOL: {tool_name}[/bold yellow]{budget_str}{detail_str}")
+    detail_str = f" [dim]{_esc(detail)}[/dim]" if detail else ""
+    console.print(f"[bold yellow]⚡ TOOL: {_esc(tool_name)}[/bold yellow]{budget_str}{detail_str}")
     emitter.emit(EventType.TOOL_USE, name=tool_name, detail=detail)
 
 
 def tool_result(tool_name: str, status: str = "success", detail: str = ""):
     """Show the result of a tool call."""
+    safe_name = _esc(tool_name)
+    safe_detail = _esc(detail)
     if status == "success":
-        console.print(f"  [dim]└─ ✔ {tool_name}: {detail}[/dim]")
+        console.print(f"  [dim]└─ ✔ {safe_name}: {safe_detail}[/dim]")
     elif status == "error":
-        console.print(f"  [dim red]└─ ✘ {tool_name}: {detail}[/dim red]")
+        console.print(f"  [red dim]└─ ✘ {safe_name}: {safe_detail}[/red dim]")
     else:
-        console.print(f"  [dim]└─ {tool_name}: {detail}[/dim]")
+        console.print(f"  [dim]└─ {safe_name}: {safe_detail}[/dim]")
     emitter.emit(EventType.TOOL_RESULT, name=tool_name, status=status, detail=detail)
 
 
@@ -423,7 +425,7 @@ def work_start(label: str = ""):
     pass
 
 def work_step(description: str):
-    console.print(f"  [dim]│ {description}[/dim]")
+    console.print(f"  [dim]│ {_esc(description)}[/dim]")
 
 def work_end():
     pass
@@ -455,7 +457,7 @@ def log_lines(raw_lines: str, max_lines: int = 8, label: str = ""):
     console.print(header)
     for line in lines[:max_lines]:
         display = line[:90] + "..." if len(line) > 90 else line
-        console.print(f"  [dim]  {display}[/dim]")
+        console.print(f"  [dim]  {_esc(display)}[/dim]")
     if len(lines) > max_lines:
         console.print(f"  [dim]  ... +{len(lines) - max_lines} more lines[/dim]")
 
@@ -468,15 +470,15 @@ def report_success(pr_link: str, root_cause: str, fix: str, files: list[dict], s
     """Display a success report."""
     lines = [
         f"[bold green]✅ BUILD FIXED[/bold green]\n",
-        f"  PR:         {pr_link}",
-        f"  Root cause: {root_cause}",
-        f"  Fix:        {fix}",
+        f"  PR:         {_esc(pr_link)}",
+        f"  Root cause: {_esc(root_cause)}",
+        f"  Fix:        {_esc(fix)}",
     ]
 
     if files:
         lines.append("\n  [bold]Files changed:[/bold]")
         for fc in files:
-            lines.append(f"    • {fc['file']}: {fc['change']}")
+            lines.append(f"    • {_esc(fc['file'])}: {_esc(fc['change'])}")
 
     if steps:
         lines.append("\n  [bold]Steps:[/bold]")
@@ -484,7 +486,7 @@ def report_success(pr_link: str, root_cause: str, fix: str, files: list[dict], s
             desc = step.description if hasattr(step, 'description') else str(step)
             result = step.result if hasattr(step, 'result') else ""
             icon = "✔" if result == "success" else "✘" if result == "failed" else "→"
-            lines.append(f"    {icon} {desc}")
+            lines.append(f"    {icon} {_esc(desc)}")
 
     console.print(Panel("\n".join(lines), border_style="green"))
 
@@ -493,13 +495,13 @@ def report_failure(pr_link: str, verdict: str, root_cause: str, why: str,
                    steps: list, hist_errors: list, live_errors: list):
     """Display a failure report."""
     lines = [
-        f"[bold red]❌ {verdict}[/bold red]\n",
-        f"  PR:         {pr_link}",
-        f"  Root cause: {root_cause or 'Could not determine'}",
+        f"[bold red]❌ {_esc(verdict)}[/bold red]\n",
+        f"  PR:         {_esc(pr_link)}",
+        f"  Root cause: {_esc(root_cause or 'Could not determine')}",
     ]
 
     if why:
-        lines.append(f"\n  [bold]Why unfixable:[/bold]\n    {why}")
+        lines.append(f"\n  [bold]Why unfixable:[/bold]\n    {_esc(why)}")
 
     if steps:
         lines.append("\n  [bold]Steps attempted:[/bold]")
@@ -507,7 +509,7 @@ def report_failure(pr_link: str, verdict: str, root_cause: str, why: str,
             desc = step.description if hasattr(step, 'description') else str(step)
             result = step.result if hasattr(step, 'result') else ""
             icon = "✔" if result == "success" else "✘" if result == "failed" else "→"
-            lines.append(f"    {icon} {desc}")
+            lines.append(f"    {icon} {_esc(desc)}")
 
     console.print(Panel("\n".join(lines), border_style="red"))
 
