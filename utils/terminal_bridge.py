@@ -222,16 +222,250 @@ class TerminalBridge:
             return False, full_path
         return True, full_path
 
-    def read_project_file(self, relative_path: str) -> str:
-        """Read a file from the project directory. Validates path stays within project."""
-        is_valid, full_path = self._validate_project_path(relative_path)
+    def read_project_file(self, path: str, start_line: int = 1, num_lines: int = 1000) -> str:
+        """
+        Read a file from the project directory with optional line range.
+        Matches PRFAgent's read_project_file API with start_line/num_lines.
+
+        Args:
+            path: Relative path within the project
+            start_line: 1-based line to start reading from (default: 1)
+            num_lines: Number of lines to read (default: 1000)
+        """
+        is_valid, full_path = self._validate_project_path(path)
         if not is_valid:
-            return f"[Error reading {relative_path}: Access denied — path escapes project directory]"
+            return f"Error: Access denied — path escapes project directory: {path}"
         try:
+            if not os.path.exists(full_path):
+                return "Error: File not found."
             with open(full_path, "r", errors="replace") as f:
-                return f.read()
+                all_lines = f.readlines()
+            total = len(all_lines)
+            start_idx = max(0, start_line - 1)
+            end_idx = start_idx + num_lines
+            segment = all_lines[start_idx:end_idx]
+            header = (
+                f"--- FILE: {path} ---\n"
+                f"--- SHOWING LINES {start_line} TO {min(end_idx, total)} OF {total} ---\n"
+            )
+            return header + "".join(segment)
         except (FileNotFoundError, PermissionError, OSError) as e:
-            return f"[Error reading {relative_path}: {e}]"
+            return f"Error: {e}"
+
+    def list_directory(self, path: str = ".") -> str:
+        """
+        List files and directories inside the project root. Read-only.
+        Returns formatted listing with [DIR] and [FILE] prefixes.
+        """
+        is_valid, target = self._validate_project_path(path)
+        if not is_valid:
+            return f"Error: Access denied — path escapes project directory: {path}"
+        try:
+            if not os.path.exists(target):
+                return "Error: Path not found."
+            items = sorted(
+                os.listdir(target),
+                key=lambda x: (not os.path.isdir(os.path.join(target, x)), x),
+            )
+            items = items[:100]  # Cap at 100 items
+            result = "\n".join(
+                f"[{'DIR ' if os.path.isdir(os.path.join(target, i)) else 'FILE'}] {i}"
+                for i in items
+            )
+            return result
+        except OSError as e:
+            return f"Error: {e}"
+
+    def grep_project(self, pattern: str, path: str = ".", file_glob: str = "",
+                     max_results: int = 50) -> str:
+        """
+        Search for a pattern in project files using grep.
+        Returns matching lines with file paths and line numbers.
+
+        Args:
+            pattern: Regex pattern to search for
+            path: Subdirectory to search in (relative to project root)
+            file_glob: Optional glob to filter files (e.g., "*.gradle", "*.kt")
+            max_results: Maximum number of matches to return
+        """
+        is_valid, target = self._validate_project_path(path)
+        if not is_valid:
+            return f"Error: Access denied — path escapes project directory: {path}"
+
+        try:
+            import subprocess as sp
+
+            cmd = ["grep", "-rn", "--include=*"]
+            if file_glob:
+                cmd = ["grep", "-rn", f"--include={file_glob}"]
+            cmd.extend([pattern, target])
+
+            result = sp.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=30,
+                errors="replace",
+            )
+
+            lines = result.stdout.strip().split("\n")
+            if not lines or (len(lines) == 1 and not lines[0]):
+                return f"No matches found for pattern '{pattern}' in {path}"
+
+            # Trim to max_results and make paths relative
+            output_lines = []
+            for line in lines[:max_results]:
+                # Make paths relative to project root
+                rel_line = line.replace(self.project_path + "/", "")
+                output_lines.append(rel_line)
+
+            result_text = "\n".join(output_lines)
+            if len(lines) > max_results:
+                result_text += f"\n\n... [{len(lines) - max_results} more matches truncated]"
+
+            return f"--- GREP: '{pattern}' in {path} ({len(output_lines)} matches) ---\n{result_text}"
+
+        except subprocess.TimeoutExpired:
+            return f"Error: Search timed out for pattern '{pattern}'"
+        except FileNotFoundError:
+            return "Error: grep command not found on this system"
+        except Exception as e:
+            return f"Error: {e}"
+
+    def find_files(self, name_pattern: str, path: str = ".", max_results: int = 30) -> str:
+        """
+        Find files by name pattern in the project.
+
+        Args:
+            name_pattern: Glob pattern for filename (e.g., "*.gradle.kts", "google-services*")
+            path: Subdirectory to search in
+            max_results: Maximum results to return
+        """
+        import glob as g
+
+        is_valid, target = self._validate_project_path(path)
+        if not is_valid:
+            return f"Error: Access denied"
+
+        full_pattern = os.path.join(target, "**", name_pattern)
+        matches = g.glob(full_pattern, recursive=True)
+
+        if not matches:
+            return f"No files found matching '{name_pattern}' in {path}"
+
+        # Make relative and cap
+        results = [os.path.relpath(m, self.project_path) for m in matches[:max_results]]
+        output = "\n".join(results)
+        if len(matches) > max_results:
+            output += f"\n\n... [{len(matches) - max_results} more files truncated]"
+
+        return f"--- FIND: '{name_pattern}' in {path} ({len(results)} files) ---\n{output}"
+
+    def run_setup_command(self, command: str, timeout: int = 120) -> str:
+        """
+        Execute a build environment setup command in the project directory.
+        Used by the agent to install Java, SDK components, patch files, etc.
+
+        SAFETY: Only allows commands that match an explicit allowlist of
+        safe prefixes. Blocks anything potentially destructive.
+
+        Returns the command output (stdout + stderr).
+        """
+        import subprocess as sp
+
+        command = command.strip()
+
+        # ── Safety: allowlist of safe command prefixes ──
+        ALLOWED_PREFIXES = [
+            # File patching (PRFAgent's core fixing strategy)
+            "sed ", "cp ", "echo ", "cat ", "mkdir ", "touch ",
+            # Downloads / fetching
+            "wget ", "curl ",
+            # Package managers (environment setup)
+            "brew install", "brew tap",
+            "sudo apt-get install", "sudo apt install", "apt-get install",
+            "sudo dnf install", "dnf install",
+            "sudo yum install", "yum install",
+            # Java / Android SDK
+            "sdkmanager ", "sdk install",
+            "java -version", "javac -version",
+            # Gradle
+            "./gradlew ", "gradle ", "chmod +x gradlew",
+            # Git
+            "git ",
+            # Environment
+            "export ", "source ", "env ",
+            # Shell utilities
+            "which ", "ls ", "find ", "head ", "tail ", "wc ",
+            "pwd", "printenv",
+        ]
+
+        # ── Safety: blocklist of dangerous patterns ──
+        BLOCKED_PATTERNS = [
+            "rm -rf /", "rm -rf ~", "rm -rf $HOME",
+            "sudo rm ", "> /dev/", "mkfs", "dd if=",
+            "chmod 777", ":(){", "fork bomb",
+            "curl | sh", "curl | bash", "wget | sh",
+            "python -c", "python3 -c",  # prevent arbitrary code execution
+            "eval ", "exec ",
+        ]
+
+        # Check blocklist first
+        cmd_lower = command.lower()
+        for blocked in BLOCKED_PATTERNS:
+            if blocked.lower() in cmd_lower:
+                return f"BLOCKED: Command matches dangerous pattern '{blocked}'. Not executed."
+
+        # Check allowlist
+        allowed = False
+        for prefix in ALLOWED_PREFIXES:
+            if command.startswith(prefix) or command.startswith("sudo " + prefix):
+                allowed = True
+                break
+
+        # Also allow piped commands where the first command is allowed
+        if not allowed and "|" in command:
+            first_cmd = command.split("|")[0].strip()
+            for prefix in ALLOWED_PREFIXES:
+                if first_cmd.startswith(prefix):
+                    allowed = True
+                    break
+
+        # Also allow chained commands (&&) where all parts are allowed
+        if not allowed and "&&" in command:
+            parts = [p.strip() for p in command.split("&&")]
+            if all(any(p.startswith(pfx) for pfx in ALLOWED_PREFIXES) for p in parts):
+                allowed = True
+
+        if not allowed:
+            return (
+                f"BLOCKED: Command '{command[:60]}...' is not in the allowed command list. "
+                f"For safety, only build environment setup commands are allowed. "
+                f"Ask the user to run this command manually in Terminal A."
+            )
+
+        # Execute the command
+        try:
+            result = sp.run(
+                command,
+                shell=True,
+                cwd=self.project_path,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                errors="replace",
+            )
+            output = result.stdout
+            if result.stderr:
+                output += "\n--- STDERR ---\n" + result.stderr
+
+            status = "SUCCESS" if result.returncode == 0 else f"FAILED (exit code {result.returncode})"
+            return f"--- COMMAND: {command} ---\n--- STATUS: {status} ---\n{output}"
+
+        except sp.TimeoutExpired:
+            return f"TIMEOUT: Command timed out after {timeout}s: {command}"
+        except Exception as e:
+            return f"ERROR: {e}"
 
     def write_project_file(self, relative_path: str, content: str) -> bool:
         """Write content to a file in the project directory. Only for build files!"""
